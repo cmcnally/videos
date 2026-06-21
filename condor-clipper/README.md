@@ -10,6 +10,19 @@ videos/ ──▶ sample frames ──▶ confirm condor + score ──▶ merge
             (ffmpeg)          (Claude vision)            hits      (ffmpeg)      + manifest.csv
 ```
 
+## Quick start (one command)
+
+Raw videos in → finished, graded, follow-the-bird reel out (~2-3 min, no clicking):
+
+```bash
+./reel.sh /path/to/folder_of_videos
+# punchier look / stronger spotlight:
+./reel.sh ~/Downloads/new_condors --pop 1.4 --spotlight 0.8
+```
+
+It runs the two steps below (clip → reel) and opens `output/reel.mp4` when done.
+First run does the Claude analysis; re-runs reuse cached tracking and are instant.
+
 ## One-time setup
 
 ```bash
