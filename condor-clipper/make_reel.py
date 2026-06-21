@@ -271,31 +271,39 @@ def grid_layout(n: int) -> tuple[int, int]:
 
 
 def build_grid_clip(images: list, out: Path, dur: float, cw: int, ch: int,
-                    pop: float, spotlight: float, idx: int = 0) -> bool:
-    """Tile 1-4 photos into a collage (1-up / 2-up / 3-up / 2x2) with a Ken Burns zoom."""
+                    pop: float, spotlight: float, idx: int = 0,
+                    gutter: int = 12, border: str = "white") -> bool:
+    """Tile 1-4 photos into a collage (1-up / 2-up / 3-up / 2x2) with a Ken Burns zoom.
+    Each photo gets a `gutter`-px `border` frame so collaged shots read clearly apart."""
     rows, cols = grid_layout(len(images))
     images = images[: rows * cols]
+    n = len(images)
     cellw, cellh = even(cw // cols), even(ch // rows)
+    g = max(0, gutter)
+    iw, ih = even(cellw - 2 * g), even(cellh - 2 * g)
     inputs = []
     for im in images:
         inputs += ["-loop", "1", "-i", str(im)]
-    fc = []
-    for i in range(len(images)):
-        fc.append(f"[{i}]scale={cellw}:{cellh}:force_original_aspect_ratio=increase,"
-                  f"crop={cellw}:{cellh},setsar=1[c{i}]")
-    rowlabels = []
-    for r in range(rows):
-        cells = "".join(f"[c{r * cols + c}]" for c in range(cols))
-        fc.append(f"{cells}hstack=inputs={cols}[r{r}]" if cols > 1 else f"{cells}copy[r{r}]")
-        rowlabels.append(f"[r{r}]")
-    fc.append(f"{''.join(rowlabels)}vstack=inputs={rows}[g]" if rows > 1
-              else f"{rowlabels[0]}copy[g]")
-    frames = max(2, int(round(dur * 30)))
-    z = "min(zoom+0.0010,1.10)" if idx % 2 == 0 else "if(lte(on,1),1.10,max(zoom-0.0010,1.0))"
+    # Base canvas in the border color; each framed photo slides + fades in, staggered.
+    fc = [f"color=c={border}:s={cw}x{ch}:r=30:d={dur:.3f}[bg]"]
+    for i in range(n):
+        delay = round(0.12 + i * 0.16, 3)
+        fc.append(f"[{i}]scale={iw}:{ih}:force_original_aspect_ratio=increase,crop={iw}:{ih},"
+                  f"pad={cellw}:{cellh}:{(cellw - iw) // 2}:{(cellh - ih) // 2}:color={border},"
+                  f"setsar=1,format=yuva420p,fade=t=in:st={delay}:d=0.35:alpha=1[c{i}]")
+    dirs = [(0, 70), (70, 0), (0, -70), (-70, 0)]  # slide from bottom / right / top / left
+    cur = "[bg]"
+    for i in range(n):
+        r0, c0 = divmod(i, cols)
+        bx, by = c0 * cellw, r0 * cellh
+        delay = round(0.12 + i * 0.16, 3)
+        dx, dy = dirs[i % 4]
+        prog = f"min(1,max(0,(t-{delay})/0.35))"
+        fc.append(f"{cur}[c{i}]overlay=x='{bx}+({dx})*(1-{prog})':"
+                  f"y='{by}+({dy})*(1-{prog})'[o{i}]")
+        cur = f"[o{i}]"
     grade = ",".join(grade_filters(pop, spotlight))
-    fc.append(f"[g]scale={2 * cw}:{2 * ch},setsar=1,"
-              f"zoompan=z='{z}':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-              f"s={cw}x{ch}:fps=30{',' + grade if grade else ''},format=yuv420p[v]")
+    fc.append(f"{cur}{grade + ',' if grade else ''}format=yuv420p[v]")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
            "-filter_complex", ";".join(fc), "-map", "[v]", "-t", f"{dur:.3f}", "-an",
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
@@ -563,6 +571,10 @@ def main() -> None:
                     help="Seconds per still photo (default: 2.5).")
     ap.add_argument("--max-photos", type=int, default=0,
                     help="Score photos and keep only the best N (0 = use all, no scoring).")
+    ap.add_argument("--gutter", type=int, default=12,
+                    help="Border/gutter px between photos in grid collages (0 = none). Default 12.")
+    ap.add_argument("--gutter-color", type=str, default="white",
+                    help="Color of the grid border/gutter (default: white).")
     ap.add_argument("--add-clips", type=Path, nargs="*", default=[],
                     help="Extra video files to include directly (trimmed to a middle window).")
     ap.add_argument("--subject", type=str, default=None,
@@ -811,7 +823,8 @@ def main() -> None:
                 ok = (build_kenburns_clip(group[0], outp, d, cw_out, ch_out,
                                           args.pop, args.spotlight, seg) if k == 1
                       else build_grid_clip(group, outp, d, cw_out, ch_out,
-                                           args.pop, args.spotlight, seg))
+                                           args.pop, args.spotlight, seg,
+                                           args.gutter, args.gutter_color))
                 if ok:
                     photo_items.append((capture_dt(group[0]), outp))
                 i += k
