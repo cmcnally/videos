@@ -42,15 +42,16 @@ FRAME_SCHEMA = {
     "properties": {
         "is_condor": {
             "type": "boolean",
-            "description": "True only if a California condor is clearly present.",
+            "description": "True if any condor (Andean or California) is clearly present.",
         },
         "species": {
             "type": "string",
-            "description": "Best guess at the large bird's species, or 'none' if no bird.",
+            "description": "Which condor, e.g. 'Andean condor' or 'California condor'; "
+                           "or the bird's species; or 'none' if no bird.",
         },
         "confidence": {
             "type": "number",
-            "description": "0.0-1.0 confidence that it is specifically a condor.",
+            "description": "0.0-1.0 confidence that the bird is a condor (any species).",
         },
         "interesting": {
             "type": "integer",
@@ -66,13 +67,17 @@ FRAME_SCHEMA = {
 }
 
 PROMPT = (
-    "You are reviewing a single frame from wildlife footage to find California condors.\n"
-    "A California condor is a very large black vulture with a bald pink/orange head, a "
-    "white triangular patch under each wing, and a ~3m wingspan. Distinguish it from "
-    "turkey vultures (smaller, silvery trailing wing edge, red head), golden/bald eagles, "
-    "and ravens. Wing tags or numbered patagial tags are a strong condor signal.\n"
-    "Return your assessment as structured data. Be conservative: only set is_condor true "
-    "when you are reasonably sure it is a condor, not just any large bird."
+    "You are reviewing a single frame from wildlife footage to find condors.\n"
+    "Condors are very large soaring vultures with broad fingered wings (~3m span):\n"
+    "- Andean condor: black body, white upperwing panels, males have a white neck ruff and "
+    "head comb; often shown over Andean/Patagonian mountains.\n"
+    "- California condor: black with a white triangular patch UNDER each wing, bald pink/orange "
+    "head, often numbered wing (patagial) tags.\n"
+    "Distinguish condors from turkey vultures (smaller, silvery trailing wing edge), "
+    "golden/bald eagles, and ravens.\n"
+    "Set is_condor true for EITHER condor species and name which in 'species'. Set confidence "
+    "to how sure you are it is a condor (any species). Be conservative: don't flag just any "
+    "large bird as a condor."
 )
 
 
@@ -85,6 +90,22 @@ class FrameResult:
     confidence: float
     interesting: int
     reason: str
+
+
+def load_env_file() -> None:
+    """Load KEY=VALUE lines from a local .env (next to this script) into the
+    environment, without overriding anything already set. No dependency needed."""
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
@@ -101,8 +122,9 @@ def require_tools() -> None:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         sys.exit(
             "error: ANTHROPIC_API_KEY is not set.\n"
-            "Get a key at https://console.anthropic.com, then:\n"
-            "  export ANTHROPIC_API_KEY=sk-ant-..."
+            "Get a key at https://console.anthropic.com, then either:\n"
+            "  - put it in condor-clipper/.env  ->  ANTHROPIC_API_KEY=sk-ant-...\n"
+            "  - or export it:                   ->  export ANTHROPIC_API_KEY=sk-ant-..."
         )
 
 
@@ -257,14 +279,35 @@ def process_video(client, args, video: Path, manifest_writer, frames_root: Path)
                 print(f"    {done}/{len(frames)} classified", end="\r")
     print()
 
+    # Per-frame detections CSV (always written — useful for tuning thresholds).
+    results.sort(key=lambda r: r.timestamp)
+    det_path = args.out / f"detections_{video.stem}.csv"
+    with det_path.open("w", newline="") as fh:
+        dw = csv.writer(fh)
+        dw.writerow(["timestamp_sec", "is_condor", "species", "confidence", "interesting", "reason"])
+        for r in results:
+            dw.writerow([round(r.timestamp, 1), r.is_condor, r.species,
+                         round(r.confidence, 2), r.interesting, r.reason])
+
+    if args.verbose:
+        for r in results:
+            flag = "CONDOR" if r.is_condor else "      "
+            print(f"    [{r.timestamp:6.1f}s] {flag} conf={r.confidence:.2f} "
+                  f"int={r.interesting:>2} {r.species} — {r.reason}")
+
+    def species_ok(r: FrameResult) -> bool:
+        return args.species == "any" or args.species in r.species.lower()
+
     hits = [
         r for r in results
         if r.is_condor
         and r.confidence >= args.min_confidence
         and r.interesting >= args.min_interesting
+        and species_ok(r)
     ]
+    sp = "" if args.species == "any" else f", species~={args.species}"
     print(f"  {len(hits)} condor frames pass thresholds "
-          f"(conf>={args.min_confidence}, interesting>={args.min_interesting})")
+          f"(conf>={args.min_confidence}, interesting>={args.min_interesting}{sp})")
 
     ranges = merge_ranges(hits, args.interval, args.gap, args.pad, duration)
     print(f"  -> {len(ranges)} clip(s)")
@@ -308,13 +351,17 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=8, help="Parallel API calls (default: 8).")
     ap.add_argument("--min-confidence", type=float, default=0.6, help="Min condor confidence 0-1 (default: 0.6).")
     ap.add_argument("--min-interesting", type=int, default=1, help="Min interesting score 1-10 (default: 1).")
+    ap.add_argument("--species", choices=["any", "california", "andean"], default="any",
+                    help="Restrict to a condor species (default: any).")
     ap.add_argument("--max-width", type=int, default=1024, help="Downscale frames to this width (default: 1024).")
     ap.add_argument("--max-frames", type=int, default=0, help="Cap frames per video (0 = no cap).")
     ap.add_argument("--copy", action="store_true", help="Fast stream-copy clips (may start on a keyframe).")
     ap.add_argument("--keep-frames", action="store_true", help="Keep sampled frames for inspection.")
     ap.add_argument("--dry-run", action="store_true", help="Classify and report, but don't write clips.")
+    ap.add_argument("--verbose", "-v", action="store_true", help="Print every frame's classification.")
     args = ap.parse_args()
 
+    load_env_file()
     require_tools()
 
     videos = gather_videos(args.input)
