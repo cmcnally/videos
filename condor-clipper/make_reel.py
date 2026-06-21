@@ -19,6 +19,7 @@ import base64
 import csv
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -267,42 +268,63 @@ def build_kenburns_clip(image: Path, out: Path, dur: float, cw: int, ch: int,
     return True
 
 
-def grid_layout(n: int) -> tuple[int, int]:
-    """rows, cols for an n-photo collage (1-up, side-by-side 2, stacked 3, 2x2)."""
-    return {1: (1, 1), 2: (2, 1), 3: (3, 1), 4: (2, 2)}.get(min(n, 4), (2, 2))
+# Layout library: each option is a list of (x, y, w, h) cells as fractions of the canvas.
+# Multiple arrangements per photo-count so collages don't feel templated.
+T = 1 / 3
+LAYOUTS = {
+    2: [
+        [(0, 0, 1, .5), (0, .5, 1, .5)],            # stacked
+        [(0, 0, .5, 1), (.5, 0, .5, 1)],            # side by side
+    ],
+    3: [
+        [(0, 0, 1, T), (0, T, 1, T), (0, 2 * T, 1, T)],            # three rows
+        [(0, 0, 1, .58), (0, .58, .5, .42), (.5, .58, .5, .42)],   # big top + 2
+        [(0, 0, .5, .42), (.5, 0, .5, .42), (0, .42, 1, .58)],     # 2 + big bottom
+        [(0, 0, .62, 1), (.62, 0, .38, .5), (.62, .5, .38, .5)],   # big left + 2 right
+    ],
+    4: [
+        [(0, 0, .5, .5), (.5, 0, .5, .5), (0, .5, .5, .5), (.5, .5, .5, .5)],         # 2x2
+        [(0, 0, .62, 1), (.62, 0, .38, T), (.62, T, .38, T), (.62, 2 * T, .38, T)],   # big left + 3
+        [(0, 0, 1, .55), (0, .55, T, .45), (T, .55, T, .45), (2 * T, .55, T, .45)],   # big top + 3
+    ],
+}
 
 
-def build_grid_clip(images: list, out: Path, dur: float, cw: int, ch: int,
-                    pop: float, spotlight: float, idx: int = 0,
-                    gutter: int = 12, border: str = "white") -> bool:
-    """Tile 1-4 photos into a collage (1-up / 2-up / 3-up / 2x2) with a Ken Burns zoom.
-    Each photo gets a `gutter`-px `border` frame so collaged shots read clearly apart."""
-    rows, cols = grid_layout(len(images))
-    images = images[: rows * cols]
-    n = len(images)
-    cellw, cellh = even(cw // cols), even(ch // rows)
+def pick_layout(n: int, rng) -> list:
+    """A cell-rectangle layout for n photos, chosen with variety."""
+    if n <= 1:
+        return [(0.0, 0.0, 1.0, 1.0)]
+    return rng.choice(LAYOUTS.get(min(n, 4), LAYOUTS[4]))
+
+
+def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, ch: int,
+                    pop: float, spotlight: float, gutter: int = 12, border: str = "white") -> bool:
+    """Place photos into arbitrary cell rectangles (magazine-style). Each gets a `gutter`-px
+    `border` frame and slides + fades in, staggered, for energetic motion."""
+    n = min(len(images), len(cells))
+    images, cells = images[:n], cells[:n]
     g = max(0, gutter)
-    iw, ih = even(cellw - 2 * g), even(cellh - 2 * g)
     inputs = []
     for im in images:
         inputs += ["-loop", "1", "-i", str(im)]
-    # Base canvas in the border color; each framed photo slides + fades in, staggered.
     fc = [f"color=c={border}:s={cw}x{ch}:r=30:d={dur:.3f}[bg]"]
-    for i in range(n):
-        delay = round(0.12 + i * 0.16, 3)
+    rects = []
+    for i, (fx, fy, fw, fh) in enumerate(cells):
+        cx, cy = even(fx * cw), even(fy * ch)
+        cwi, chi = even(fw * cw), even(fh * ch)
+        iw, ih = max(2, even(cwi - 2 * g)), max(2, even(chi - 2 * g))
+        delay = round(0.10 + i * 0.15, 3)
         fc.append(f"[{i}]scale={iw}:{ih}:force_original_aspect_ratio=increase,crop={iw}:{ih},"
-                  f"pad={cellw}:{cellh}:{(cellw - iw) // 2}:{(cellh - ih) // 2}:color={border},"
-                  f"setsar=1,format=yuva420p,fade=t=in:st={delay}:d=0.35:alpha=1[c{i}]")
+                  f"pad={cwi}:{chi}:{(cwi - iw) // 2}:{(chi - ih) // 2}:color={border},setsar=1,"
+                  f"format=yuva420p,fade=t=in:st={delay}:d=0.35:alpha=1[c{i}]")
+        rects.append((cx, cy, delay))
     dirs = [(0, 70), (70, 0), (0, -70), (-70, 0)]  # slide from bottom / right / top / left
     cur = "[bg]"
-    for i in range(n):
-        r0, c0 = divmod(i, cols)
-        bx, by = c0 * cellw, r0 * cellh
-        delay = round(0.12 + i * 0.16, 3)
+    for i, (cx, cy, delay) in enumerate(rects):
         dx, dy = dirs[i % 4]
         prog = f"min(1,max(0,(t-{delay})/0.35))"
-        fc.append(f"{cur}[c{i}]overlay=x='{bx}+({dx})*(1-{prog})':"
-                  f"y='{by}+({dy})*(1-{prog})'[o{i}]")
+        fc.append(f"{cur}[c{i}]overlay=x='{cx}+({dx})*(1-{prog})':"
+                  f"y='{cy}+({dy})*(1-{prog})'[o{i}]")
         cur = f"[o{i}]"
     grade = ",".join(grade_filters(pop, spotlight))
     fc.append(f"{cur}{grade + ',' if grade else ''}format=yuv420p[v]")
@@ -359,22 +381,32 @@ def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
     return True
 
 
-def build_reel(normalized: list[Path], out: Path, transition: float, music: Path | None) -> bool:
-    """Stitch normalized clips with cross-fades, fade in/out to black, optional music."""
+# Varied xfade transitions for a kinetic Quik-style feel (cross, slides, wipes, splits).
+TRANSITIONS = ["fade", "dissolve", "slideleft", "slideright", "slideup", "slidedown",
+               "wipeleft", "wiperight", "wipeup", "wipedown", "smoothleft", "smoothright",
+               "smoothup", "smoothdown", "circleopen", "horzopen", "vertopen", "fadeblack"]
+
+
+def build_reel(normalized: list[Path], out: Path, transition: float, music: Path | None,
+               seed: int = 0) -> bool:
+    """Stitch clips with varied transitions (slides/wipes/splits/dissolves), fade in/out, music."""
     durs = [probe_dims(p)[2] for p in normalized]
     n = len(normalized)
     fade = max(0.0, transition)
+    rng = random.Random(seed)
     inputs: list[str] = []
     for p in normalized:
         inputs += ["-i", str(p)]
 
     fc: list[str] = []
     if n > 1 and fade > 0:
-        cur, total = "[0:v]", durs[0]
+        cur, total, prev = "[0:v]", durs[0], None
         for j in range(1, n):
             off = max(0.0, total - fade)
             lab = f"[vx{j}]"
-            fc.append(f"{cur}[{j}:v]xfade=transition=fade:duration={fade:.3f}:offset={off:.3f}{lab}")
+            trans = rng.choice([t for t in TRANSITIONS if t != prev])
+            prev = trans
+            fc.append(f"{cur}[{j}:v]xfade=transition={trans}:duration={fade:.3f}:offset={off:.3f}{lab}")
             cur, total = lab, total + durs[j] - fade
     else:
         joined = "".join(f"[{i}:v]" for i in range(n))
@@ -573,6 +605,8 @@ def main() -> None:
                     help="Seconds per still photo (default: 2.5).")
     ap.add_argument("--max-photos", type=int, default=0,
                     help="Score photos and keep only the best N (0 = use all, no scoring).")
+    ap.add_argument("--seed", type=int, default=7,
+                    help="Random seed for layout/size variety (change it to reshuffle the look).")
     ap.add_argument("--gutter", type=int, default=12,
                     help="Border/gutter px between photos in grid collages (0 = none). Default 12.")
     ap.add_argument("--gutter-color", type=str, default="white",
@@ -815,23 +849,25 @@ def main() -> None:
                     print(f"Kept top {len(photos)} photo(s) by score.")
             # Fast montage: walk photos into a varying mix of 1-up / 2-up / 3-up / 2x2 grids,
             # each with a Ken Burns zoom.
-            sizes = [1, 2, 4, 1, 3, 4, 2, 1, 4, 2, 3]
+            rng = random.Random(args.seed)
             i = seg = 0
             while i < len(photos):
-                k = min(sizes[seg % len(sizes)], len(photos) - i)
+                k = min(rng.choice([1, 1, 2, 2, 3, 4, 4]), len(photos) - i)
                 group = photos[i:i + k]
                 outp = norm_tmp / f"ph_{seg:02d}.mp4"
                 d = args.photo_len if k == 1 else args.photo_len * 1.5
-                ok = (build_kenburns_clip(group[0], outp, d, cw_out, ch_out,
-                                          args.pop, args.spotlight, seg) if k == 1
-                      else build_grid_clip(group, outp, d, cw_out, ch_out,
-                                           args.pop, args.spotlight, seg,
-                                           args.gutter, args.gutter_color))
+                if k == 1:
+                    ok = build_kenburns_clip(group[0], outp, d, cw_out, ch_out,
+                                             args.pop, args.spotlight, seg)
+                else:
+                    cells = pick_layout(k, rng)
+                    ok = build_grid_clip(group, cells, outp, d, cw_out, ch_out,
+                                         args.pop, args.spotlight, args.gutter, args.gutter_color)
                 if ok:
                     photo_items.append((capture_dt(group[0]), outp))
                 i += k
                 seg += 1
-            print(f"Added {len(photo_items)} photo segment(s) (mix of singles + grids).")
+            print(f"Added {len(photo_items)} photo segment(s) (varied layouts).")
 
         if args.coverage:  # chronological: tell the trip in order, photos & video interwoven
             items = video_items + photo_items
@@ -856,7 +892,7 @@ def main() -> None:
 
         print(f"\nStitching reel ({args.canvas}, zoom {args.zoom}, transition {args.transition}s"
               f"{', music' if args.music else ''}) ...")
-        if not build_reel(sequence, args.out, args.transition, args.music):
+        if not build_reel(sequence, args.out, args.transition, args.music, args.seed):
             sys.exit("Reel build failed.")
     finally:
         shutil.rmtree(frames_tmp, ignore_errors=True)
