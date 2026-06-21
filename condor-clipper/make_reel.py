@@ -264,6 +264,48 @@ def build_kenburns_clip(image: Path, out: Path, dur: float, cw: int, ch: int,
     return True
 
 
+def grid_layout(n: int) -> tuple[int, int]:
+    """rows, cols for an n-photo collage (1-up, side-by-side 2, stacked 3, 2x2)."""
+    return {1: (1, 1), 2: (2, 1), 3: (3, 1), 4: (2, 2)}.get(min(n, 4), (2, 2))
+
+
+def build_grid_clip(images: list, out: Path, dur: float, cw: int, ch: int,
+                    pop: float, spotlight: float, idx: int = 0) -> bool:
+    """Tile 1-4 photos into a collage (1-up / 2-up / 3-up / 2x2) with a Ken Burns zoom."""
+    rows, cols = grid_layout(len(images))
+    images = images[: rows * cols]
+    cellw, cellh = even(cw // cols), even(ch // rows)
+    inputs = []
+    for im in images:
+        inputs += ["-loop", "1", "-i", str(im)]
+    fc = []
+    for i in range(len(images)):
+        fc.append(f"[{i}]scale={cellw}:{cellh}:force_original_aspect_ratio=increase,"
+                  f"crop={cellw}:{cellh},setsar=1[c{i}]")
+    rowlabels = []
+    for r in range(rows):
+        cells = "".join(f"[c{r * cols + c}]" for c in range(cols))
+        fc.append(f"{cells}hstack=inputs={cols}[r{r}]" if cols > 1 else f"{cells}copy[r{r}]")
+        rowlabels.append(f"[r{r}]")
+    fc.append(f"{''.join(rowlabels)}vstack=inputs={rows}[g]" if rows > 1
+              else f"{rowlabels[0]}copy[g]")
+    frames = max(2, int(round(dur * 30)))
+    z = "min(zoom+0.0010,1.10)" if idx % 2 == 0 else "if(lte(on,1),1.10,max(zoom-0.0010,1.0))"
+    grade = ",".join(grade_filters(pop, spotlight))
+    fc.append(f"[g]scale={2 * cw}:{2 * ch},setsar=1,"
+              f"zoompan=z='{z}':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+              f"s={cw}x{ch}:fps=30{',' + grade if grade else ''},format=yuv420p[v]")
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
+           "-filter_complex", ";".join(fc), "-map", "[v]", "-t", f"{dur:.3f}", "-an",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           "-pix_fmt", "yuv420p", "-color_range", "tv", "-movflags", "+faststart", str(out)]
+    cp = run(cmd)
+    if cp.returncode != 0:
+        print(f"  ! grid failed: {cp.stderr.strip()[:200]}", file=sys.stderr)
+        return False
+    return True
+
+
 def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
                     cw_out: int, ch_out: int, out: Path, pop: float = 1.0,
                     spotlight: float = 0.6, start: float = 0.0,
@@ -442,6 +484,13 @@ def interleave(vids: list, photos: list) -> list:
     return out
 
 
+def capture_dt(path: Path) -> str:
+    """Capture timestamp 'YYYY-MM-DD HH:MM:SS' via Spotlight metadata; '' if unknown."""
+    cp = run(["mdls", "-raw", "-name", "kMDItemContentCreationDate", str(path)])
+    s = (cp.stdout or "").strip()
+    return s[:19] if s and s != "(null)" else ""
+
+
 def scores_from_detections(clip_name: str, manifest: Path, out_dir: Path, clip_dur: float):
     """Reuse the clipper's per-frame 'interesting' scores (no API). Maps the clip back to
     its source via the manifest and reads detections_<source>.csv. Non-condor frames -> 0."""
@@ -514,6 +563,9 @@ def main() -> None:
     ap.add_argument("--subject", type=str, default=None,
                     help="Free-text 'look for' brief for scoring (e.g. 'people laughing, "
                          "landscapes, animals, the energy of the trip'). Default: condors in flight.")
+    ap.add_argument("--coverage", action="store_true",
+                    help="Spread picks across every capture day (a bit of each day) and order the "
+                         "reel chronologically, instead of just the globally top-scoring moments.")
     ap.add_argument("--rescore", action="store_true",
                     help="Force re-scoring moments (ignore cached scores in output/_cache).")
     args = ap.parse_args()
@@ -552,7 +604,7 @@ def main() -> None:
 
     client = None
 
-    normalized: list[Path] = []
+    nseg = 0
     try:
         # Score every clip (reusing the clipper's per-frame scores when available, so no
         # new API calls), then build candidate highlight windows across all of them.
@@ -592,52 +644,97 @@ def main() -> None:
         if not candidates and not args.add_clips and not args.photos:
             sys.exit("Nothing to build.")
 
-        # Optionally feature a hero clip: lead with its best window, given more time.
-        featured = None
-        if args.feature:
-            fname = next((n for n in clip_meta if args.feature.lower() in n.lower()), None)
-            if fname:
-                fc, fscores, fw, fh, fdur = clip_meta[fname]
-                flen = min(args.feature_len, fdur)
-                if args.feature_at is not None:
-                    fst, fscore = max(0.0, min(args.feature_at, fdur - flen)), 10.0
+        cdt = {n: capture_dt(clip_meta[n][0]) for n in clip_meta}
+        opener_dt = ""
+        if args.coverage:
+            # Best moment from each capture day, round-robin, until we hit the target.
+            by_day = {}
+            for cand in candidates:
+                by_day.setdefault(cdt.get(cand[1].name, "")[:10], []).append(cand)
+            for d in by_day:
+                by_day[d].sort(key=lambda x: x[0], reverse=True)
+            days = sorted(by_day)
+            selected, used, total, r = [], {}, 0.0, 0
+            # Optional forced opener (e.g. the plane landing); chronological sort keeps it first.
+            if args.feature:
+                fname = next((n for n in clip_meta if args.feature.lower() in n.lower()), None)
+                if fname:
+                    fc, fscores, fw, fh, fdur = clip_meta[fname]
+                    flen = min(args.feature_len, fdur)
+                    fst = (max(0.0, min(args.feature_at, fdur - flen)) if args.feature_at is not None
+                           else best_score_window(fscores, fdur, flen)[0])
+                    selected.append((10.0, fc, fst, flen, fw, fh))
+                    used.setdefault(fc.name, []).append((fst, fst + flen))
+                    total += flen
+                    opener_dt = cdt.get(fc.name, "")
+                    print(f"Opening with {fname} @ {fst:.1f}-{fst + flen:.1f}s ({opener_dt[:10]})")
                 else:
-                    fst, fscore = best_score_window(fscores, fdur, flen)
-                featured = (fscore, fc, fst, flen, fw, fh)
-                print(f"Featuring {fname} @ {fst:.1f}-{fst + flen:.1f}s as the lead shot.")
-            else:
-                print(f"  ! --feature '{args.feature}' matched no clip; ignoring.")
+                    print(f"  ! --feature '{args.feature}' matched no clip; ignoring.")
+            maxlen = max((len(v) for v in by_day.values()), default=0)
+            while total < args.target and r < maxlen:
+                for d in days:
+                    if total >= args.target:
+                        break
+                    if r >= len(by_day[d]):
+                        continue
+                    sc, c, st, du, w, h = by_day[d][r]
+                    if len(used.get(c.name, [])) >= args.per_clip_max:
+                        continue
+                    if any(not (st + du <= a or st >= b) for a, b in used.get(c.name, [])):
+                        continue
+                    selected.append(by_day[d][r])
+                    used.setdefault(c.name, []).append((st, st + du))
+                    total += du
+                r += 1
+            print(f"\nCoverage: {len(selected)} clip moment(s) (~{total:.0f}s) across "
+                  f"{len([d for d in days if d])} day(s).")
+        else:
+            # Optionally feature a hero clip: lead with its best window, given more time.
+            featured = None
+            if args.feature:
+                fname = next((n for n in clip_meta if args.feature.lower() in n.lower()), None)
+                if fname:
+                    fc, fscores, fw, fh, fdur = clip_meta[fname]
+                    flen = min(args.feature_len, fdur)
+                    if args.feature_at is not None:
+                        fst, fscore = max(0.0, min(args.feature_at, fdur - flen)), 10.0
+                    else:
+                        fst, fscore = best_score_window(fscores, fdur, flen)
+                    featured = (fscore, fc, fst, flen, fw, fh)
+                    print(f"Featuring {fname} @ {fst:.1f}-{fst + flen:.1f}s as the lead shot.")
+                else:
+                    print(f"  ! --feature '{args.feature}' matched no clip; ignoring.")
 
-        # Greedily pick the best non-overlapping windows (multiple per clip allowed).
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        selected, used, total = [], {}, 0.0
-        if featured:
-            _, fc, fst, flen, _, _ = featured
-            selected.append(featured)
-            used.setdefault(fc.name, []).append((fst, fst + flen))
-            total += flen
-        for sc, c, st, du, w, h in candidates:
-            if total >= args.target:
-                break
-            if len(used.get(c.name, [])) >= args.per_clip_max:
-                continue  # already took enough from this clip — spread for variety
-            if any(not (st + du <= a or st >= b) for a, b in used.get(c.name, [])):
-                continue  # overlaps a window already chosen from this clip
-            selected.append((sc, c, st, du, w, h))
-            used.setdefault(c.name, []).append((st, st + du))
-            total += du
-        # Best moment first — but keep the featured shot leading if set.
-        rest = sorted([s for s in selected if s is not featured], key=lambda x: x[0], reverse=True)
-        selected = ([featured] if featured else []) + rest
-        print(f"\nSelected {len(selected)} highlight(s) (~{total:.0f}s) from {len(used)} clip(s):")
+            # Greedily pick the best non-overlapping windows (multiple per clip allowed).
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            selected, used, total = [], {}, 0.0
+            if featured:
+                _, fc, fst, flen, _, _ = featured
+                selected.append(featured)
+                used.setdefault(fc.name, []).append((fst, fst + flen))
+                total += flen
+            for sc, c, st, du, w, h in candidates:
+                if total >= args.target:
+                    break
+                if len(used.get(c.name, [])) >= args.per_clip_max:
+                    continue
+                if any(not (st + du <= a or st >= b) for a, b in used.get(c.name, [])):
+                    continue
+                selected.append((sc, c, st, du, w, h))
+                used.setdefault(c.name, []).append((st, st + du))
+                total += du
+            rest = sorted([s for s in selected if s is not featured], key=lambda x: x[0], reverse=True)
+            selected = ([featured] if featured else []) + rest
+            print(f"\nSelected {len(selected)} highlight(s) (~{total:.0f}s) from {len(used)} clip(s):")
         for sc, c, st, du, _, _ in selected:
-            print(f"  - {c.name} @ {st:.1f}-{st + du:.1f}s  (flight {sc:.1f}/10)")
+            print(f"  - {c.name} @ {st:.1f}-{st + du:.1f}s  (score {sc:.1f}, {cdt.get(c.name, '?')[:10]})")
 
+        video_items = []  # (capture_dt, path)
         for i, (sc, c, st, du, w, h) in enumerate(selected):
             outn = norm_tmp / f"norm_{i:02d}_{c.stem}.mp4"
             if build_zoom_clip(c, [(0.0, 0.5, 0.5)], w, h, args.zoom, cw_out, ch_out, outn,
                                args.pop, args.spotlight, st, du):
-                normalized.append(outn)
+                video_items.append((cdt.get(c.name, ""), outn))
 
         # Extra videos included directly (no scoring), trimmed to a middle window.
         for i, extra in enumerate(args.add_clips):
@@ -650,11 +747,11 @@ def main() -> None:
             outn = norm_tmp / f"add_{i:02d}.mp4"
             if build_zoom_clip(extra, [(0.0, 0.5, 0.5)], ew, eh, args.zoom, cw_out, ch_out, outn,
                                args.pop, args.spotlight, est, elen):
-                normalized.append(outn)
+                video_items.append((capture_dt(extra), outn))
                 print(f"+ added video {extra.name}")
 
-        # Still photos -> Ken Burns clips. Score & keep the best N if --max-photos.
-        photo_clips = []
+        # Still photos -> Ken Burns clips. Score & keep the best (coverage spreads across days).
+        photo_items = []  # (capture_dt, path)
         if args.photos:
             photos = ([args.photos] if args.photos.is_file()
                       else sorted(p for p in args.photos.iterdir() if p.suffix.lower() in IMAGE_EXTS))
@@ -663,18 +760,68 @@ def main() -> None:
                     client = anthropic.Anthropic()
                 pscores = score_photos(client, args.model, photos, cache_dir, frames_tmp,
                                        prompt=criteria_prompt(args.subject, "photo"))
-                photos = sorted(photos, key=lambda p: pscores.get(p.name, 0), reverse=True)[: args.max_photos]
-                print(f"Kept top {len(photos)} photo(s) by score.")
-            for i, ph in enumerate(photos):
-                outp = norm_tmp / f"kb_{i:02d}.mp4"
-                if build_kenburns_clip(ph, outp, args.photo_len, cw_out, ch_out,
-                                       args.pop, args.spotlight, i):
-                    photo_clips.append(outp)
-            print(f"Added {len(photo_clips)} photo(s) with Ken Burns motion.")
+                if args.coverage:
+                    pdt = {p.name: capture_dt(p) for p in photos}
+                    if opener_dt:  # only photos from the trip window (on/after the opener)
+                        photos = [p for p in photos if not (pdt[p.name] and pdt[p.name] < opener_dt)]
+                    by_day = {}
+                    for p in photos:
+                        by_day.setdefault(pdt[p.name][:10], []).append(p)
+                    for d in by_day:
+                        by_day[d].sort(key=lambda p: pscores.get(p.name, 0), reverse=True)
+                    chosen, r = [], 0
+                    maxlen = max((len(v) for v in by_day.values()), default=0)
+                    while len(chosen) < args.max_photos and r < maxlen:
+                        for d in sorted(by_day):
+                            if len(chosen) >= args.max_photos:
+                                break
+                            if r < len(by_day[d]):
+                                chosen.append(by_day[d][r])
+                        r += 1
+                    photos = chosen
+                    print(f"Coverage: kept {len(photos)} photo(s) across {len(by_day)} day(s).")
+                else:
+                    photos = sorted(photos, key=lambda p: pscores.get(p.name, 0), reverse=True)[: args.max_photos]
+                    print(f"Kept top {len(photos)} photo(s) by score.")
+            # Fast montage: walk photos into a varying mix of 1-up / 2-up / 3-up / 2x2 grids,
+            # each with a Ken Burns zoom.
+            sizes = [1, 2, 4, 1, 3, 4, 2, 1, 4, 2, 3]
+            i = seg = 0
+            while i < len(photos):
+                k = min(sizes[seg % len(sizes)], len(photos) - i)
+                group = photos[i:i + k]
+                outp = norm_tmp / f"ph_{seg:02d}.mp4"
+                d = args.photo_len if k == 1 else args.photo_len * 1.5
+                ok = (build_kenburns_clip(group[0], outp, d, cw_out, ch_out,
+                                          args.pop, args.spotlight, seg) if k == 1
+                      else build_grid_clip(group, outp, d, cw_out, ch_out,
+                                           args.pop, args.spotlight, seg))
+                if ok:
+                    photo_items.append((capture_dt(group[0]), outp))
+                i += k
+                seg += 1
+            print(f"Added {len(photo_items)} photo segment(s) (mix of singles + grids).")
 
-        sequence = interleave(normalized, photo_clips)
+        if args.coverage:  # chronological: tell the trip in order, photos & video interwoven
+            items = video_items + photo_items
+            if args.feature and video_items:
+                # Forced opener: pin it first and drop anything captured before it.
+                opener_dt, opener_path = video_items[0]
+                rest = [(dt, p) for dt, p in items
+                        if p != opener_path and not (dt and opener_dt and dt < opener_dt)]
+                rest.sort(key=lambda x: x[0] or "9999")
+                dropped = len(items) - 1 - len(rest)
+                if dropped > 0:
+                    print(f"Dropped {dropped} segment(s) captured before the opener.")
+                sequence = [opener_path] + [p for _, p in rest]
+            else:
+                items.sort(key=lambda x: x[0] or "9999")
+                sequence = [p for _, p in items]
+        else:
+            sequence = interleave([p for _, p in video_items], [p for _, p in photo_items])
         if not sequence:
             sys.exit("Nothing to build (no usable clips or photos).")
+        nseg = len(sequence)
 
         print(f"\nStitching reel ({args.canvas}, zoom {args.zoom}, transition {args.transition}s"
               f"{', music' if args.music else ''}) ...")
@@ -685,7 +832,7 @@ def main() -> None:
         shutil.rmtree(norm_tmp, ignore_errors=True)
 
     dur = probe_dims(args.out)[2]
-    print(f"\nDone. Reel: {args.out}  ({len(normalized)} clips, {dur:.1f}s, {args.canvas})")
+    print(f"\nDone. Reel: {args.out}  ({nseg} segments, {dur:.1f}s, {args.canvas})")
     print("Tracking cached in output/_cache — re-edit framing/zoom/music instantly (no API cost).")
 
 
