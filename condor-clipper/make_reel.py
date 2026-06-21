@@ -141,8 +141,15 @@ def piecewise(times: list[float], vals: list[float]) -> str:
 
 
 def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
-                    cw_out: int, ch_out: int, out: Path) -> bool:
-    """Crop a moving window that follows the condor, scale to the output canvas."""
+                    cw_out: int, ch_out: int, out: Path, pop: float = 1.0,
+                    spotlight: float = 0.6) -> bool:
+    """Crop a moving window that follows the condor, scale to the output canvas.
+
+    Because the crop is centered on the bird, the condor sits near the middle of
+    the output frame — so a centered vignette acts as a spotlight that follows it.
+    `pop` scales a punchy grade (contrast/saturation/sharpness); `spotlight`
+    (0-1) sets the vignette strength.
+    """
     target_ar = cw_out / ch_out
     if src_w / src_h >= target_ar:          # source wider than canvas -> limit by height
         max_h, max_w = src_h, src_h * target_ar
@@ -159,8 +166,16 @@ def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
     # Escape commas so ffmpeg treats the exprs as single crop options.
     xexpr, yexpr = xexpr.replace(",", "\\,"), yexpr.replace(",", "\\,")
 
-    vf = (f"crop={win_w}:{win_h}:x={xexpr}:y={yexpr},"
-          f"scale={cw_out}:{ch_out}:flags=lanczos,setsar=1,fps=30,format=yuv420p")
+    filters = [f"crop={win_w}:{win_h}:x={xexpr}:y={yexpr}",
+               f"scale={cw_out}:{ch_out}:flags=lanczos", "setsar=1"]
+    if pop > 0:  # the "pop" grade: punchier contrast/saturation + sharpen the bird
+        filters.append(f"eq=contrast={1 + 0.14 * pop:.3f}:saturation={1 + 0.22 * pop:.3f}:"
+                       f"brightness={0.01 * pop:.3f}")
+        filters.append(f"unsharp=5:5:{0.9 * pop:.3f}:5:5:0.0")
+    if spotlight > 0:  # centered vignette = spotlight that follows the (centered) bird
+        filters.append(f"vignette=angle={0.6 + 0.6 * spotlight:.3f}")
+    filters += ["fps=30", "format=yuv420p"]
+    vf = ",".join(filters)
     cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
               "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
               "-movflags", "+faststart", str(out)])
@@ -242,6 +257,10 @@ def main() -> None:
     ap.add_argument("--transition", type=float, default=0.7,
                     help="Cross-fade seconds between clips, and fade in/out (0 = hard cuts). Default 0.7.")
     ap.add_argument("--music", type=Path, help="Audio file to lay under the reel (looped, faded).")
+    ap.add_argument("--pop", type=float, default=1.0,
+                    help="Grade intensity: contrast/saturation/sharpness (0 = off, 1 = default, 2 = bold).")
+    ap.add_argument("--spotlight", type=float, default=0.6,
+                    help="Spotlight/vignette on the (centered) condor, 0-1 (0 = off). Default 0.6.")
     ap.add_argument("--retrack", action="store_true",
                     help="Force re-running condor tracking (ignore cached tracking in output/_cache).")
     args = ap.parse_args()
@@ -295,7 +314,8 @@ def main() -> None:
             else:
                 print(f"== {c.name}: cached tracking")
             outn = norm_tmp / f"norm_{c.stem}.mp4"
-            if build_zoom_clip(c, centers, w, h, args.zoom, cw_out, ch_out, outn):
+            if build_zoom_clip(c, centers, w, h, args.zoom, cw_out, ch_out, outn,
+                               args.pop, args.spotlight):
                 normalized.append(outn)
         if not normalized:
             sys.exit("No clips processed.")
