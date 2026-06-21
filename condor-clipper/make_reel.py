@@ -19,6 +19,7 @@ import base64
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -485,7 +486,11 @@ def interleave(vids: list, photos: list) -> list:
 
 
 def capture_dt(path: Path) -> str:
-    """Capture timestamp 'YYYY-MM-DD HH:MM:SS' via Spotlight metadata; '' if unknown."""
+    """Capture timestamp 'YYYY-MM-DD HH:MM:SS'. Prefers a date prefix in the filename
+    (e.g. extracted book photos), else falls back to Spotlight metadata; '' if unknown."""
+    m = re.match(r"(\d{4}-\d{2}-\d{2})[T ](\d{2})[-:](\d{2})[-:](\d{2})", path.name)
+    if m:
+        return f"{m.group(1)} {m.group(2)}:{m.group(3)}:{m.group(4)}"
     cp = run(["mdls", "-raw", "-name", "kMDItemContentCreationDate", str(path)])
     s = (cp.stdout or "").strip()
     return s[:19] if s and s != "(null)" else ""
@@ -563,6 +568,9 @@ def main() -> None:
     ap.add_argument("--subject", type=str, default=None,
                     help="Free-text 'look for' brief for scoring (e.g. 'people laughing, "
                          "landscapes, animals, the energy of the trip'). Default: condors in flight.")
+    ap.add_argument("--min-score", type=float, default=0.0,
+                    help="Drop video moments scoring below this (0-10) so only strong clips show; "
+                         "photos still cover every day.")
     ap.add_argument("--coverage", action="store_true",
                     help="Spread picks across every capture day (a bit of each day) and order the "
                          "reel chronologically, instead of just the globally top-scoring moments.")
@@ -640,6 +648,12 @@ def main() -> None:
                     pts = [v for t, v in scores if s - 1e-6 <= t <= s + WIN + 1e-6]
                     candidates.append((sum(pts) / len(pts) if pts else 0.0, c, s, WIN, w, h))
                     s += 0.5
+
+        if args.min_score > 0:
+            before = len(candidates)
+            candidates = [c for c in candidates if c[0] >= args.min_score]
+            print(f"Quality floor: kept {len(candidates)}/{before} video windows "
+                  f"scoring >= {args.min_score}")
 
         if not candidates and not args.add_clips and not args.photos:
             sys.exit("Nothing to build.")
@@ -755,6 +769,8 @@ def main() -> None:
         if args.photos:
             photos = ([args.photos] if args.photos.is_file()
                       else sorted(p for p in args.photos.iterdir() if p.suffix.lower() in IMAGE_EXTS))
+            if args.coverage and opener_dt:  # keep only photos from the trip window onward
+                photos = [p for p in photos if not (capture_dt(p) and capture_dt(p) < opener_dt)]
             if args.max_photos and len(photos) > args.max_photos:
                 if client is None:
                     client = anthropic.Anthropic()
