@@ -140,9 +140,30 @@ def piecewise(times: list[float], vals: list[float]) -> str:
     return f"if(lt(t,{times[0]:.3f}),{vals[0]:.1f},{expr})"
 
 
+def best_window(centers, clip_dur: float, win_len: float) -> tuple[float, float]:
+    """Pick the most dynamic win_len-second window (most condor motion = liveliest).
+    Falls back to the middle of the clip when tracking is flat/missing."""
+    if clip_dur <= win_len:
+        return 0.0, clip_dur
+    middle = (max(0.0, (clip_dur - win_len) / 2.0), win_len)
+    if len(centers) < 2:
+        return middle
+    best_start, best_motion = 0.0, -1.0
+    s = 0.0
+    while s <= clip_dur - win_len + 1e-6:
+        pts = [(t, cx, cy) for t, cx, cy in centers if s - 1e-6 <= t <= s + win_len + 1e-6]
+        motion = sum(abs(pts[i][1] - pts[i - 1][1]) + abs(pts[i][2] - pts[i - 1][2])
+                     for i in range(1, len(pts)))
+        if motion > best_motion:
+            best_start, best_motion = s, motion
+        s += 0.5
+    return (best_start, win_len) if best_motion > 1e-6 else middle
+
+
 def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
                     cw_out: int, ch_out: int, out: Path, pop: float = 1.0,
-                    spotlight: float = 0.6) -> bool:
+                    spotlight: float = 0.6, start: float = 0.0,
+                    dur: float | None = None) -> bool:
     """Crop a moving window that follows the condor, scale to the output canvas.
 
     Because the crop is centered on the bird, the condor sits near the middle of
@@ -176,7 +197,8 @@ def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
         filters.append(f"vignette=angle={0.6 + 0.6 * spotlight:.3f}")
     filters += ["fps=30", "format=yuv420p"]
     vf = ",".join(filters)
-    cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
+    trim = ["-ss", f"{start:.3f}", "-t", f"{dur:.3f}"] if dur else []
+    cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *trim, "-i", str(video),
               "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
               "-pix_fmt", "yuv420p", "-color_range", "tv", "-movflags", "+faststart", str(out)])
     if cp.returncode != 0:
@@ -262,6 +284,10 @@ def main() -> None:
                     help="Grade intensity: contrast/saturation/sharpness (0 = off, 1 = default, 2 = bold).")
     ap.add_argument("--spotlight", type=float, default=0.6,
                     help="Spotlight/vignette on the (centered) condor, 0-1 (0 = off). Default 0.6.")
+    ap.add_argument("--clip-len", type=float, default=3.5,
+                    help="Seconds of each clip's best window to keep (0 = whole clip). Default 3.5.")
+    ap.add_argument("--max-clips", type=int, default=6,
+                    help="Use at most this many clips, best-first (default: 6).")
     ap.add_argument("--retrack", action="store_true",
                     help="Force re-running condor tracking (ignore cached tracking in output/_cache).")
     args = ap.parse_args()
@@ -275,7 +301,10 @@ def main() -> None:
     if not clips:
         sys.exit(f"No clips found in {args.clips}")
     clips = order_by_manifest(clips, args.manifest)
-    print(f"Building reel from {len(clips)} clip(s), best-first:")
+    if args.max_clips > 0:
+        clips = clips[: args.max_clips]
+    print(f"Building reel from {len(clips)} clip(s), best-first"
+          f"{f', best {args.clip_len}s of each' if args.clip_len else ''}:")
     for c in clips:
         print(f"  - {c.name}")
 
@@ -301,7 +330,7 @@ def main() -> None:
     normalized: list[Path] = []
     try:
         for c in clips:
-            w, h, _ = probe_dims(c)
+            w, h, clip_dur = probe_dims(c)
             if not w or not h:
                 print(f"  ! {c.name}: couldn't probe dimensions, skipping")
                 continue
@@ -314,9 +343,19 @@ def main() -> None:
                      "centers": [[round(t, 3), round(cx, 4), round(cy, 4)] for t, cx, cy in centers]}))
             else:
                 print(f"== {c.name}: cached tracking")
+
+            # Trim each clip to its most dynamic window, and rebase tracking to it.
+            if args.clip_len and clip_dur > args.clip_len:
+                wstart, wdur = best_window(centers, clip_dur, args.clip_len)
+                wcenters = [(t - wstart, cx, cy) for t, cx, cy in centers
+                            if wstart - 1e-6 <= t <= wstart + wdur + 1e-6] or [(0.0, 0.5, 0.5)]
+                print(f"   best {wdur:.1f}s window @ {wstart:.1f}s")
+            else:
+                wstart, wdur, wcenters = 0.0, None, centers
+
             outn = norm_tmp / f"norm_{c.stem}.mp4"
-            if build_zoom_clip(c, centers, w, h, args.zoom, cw_out, ch_out, outn,
-                               args.pop, args.spotlight):
+            if build_zoom_clip(c, wcenters, w, h, args.zoom, cw_out, ch_out, outn,
+                               args.pop, args.spotlight, wstart, wdur):
                 normalized.append(outn)
         if not normalized:
             sys.exit("No clips processed.")
