@@ -162,8 +162,19 @@ SCORE_PROMPT = (
 )
 
 
-def score_clip(client, model: str, clip: Path, step: float, tmp: Path, workers: int = 8):
-    """Return [(t, flight_score 1-10)] sampled across the clip."""
+def criteria_prompt(subject: str, medium: str) -> str:
+    """Build a scoring prompt from a free-text 'look for' brief (or fall back to condors)."""
+    if not subject:
+        return SCORE_PROMPT
+    return (f"Rate this {medium} 1-10 for a fun, upbeat trip highlight reel. We especially want: "
+            f"{subject}. 10 = a vivid, joyful, share-worthy moment that captures that energy; "
+            f"5 = fine but ordinary; 1 = dull, blurry, empty, or off-topic.")
+
+
+def score_clip(client, model: str, clip: Path, step: float, tmp: Path, workers: int = 8,
+               prompt: str = None):
+    """Return [(t, score 1-10)] sampled across the clip."""
+    prompt = prompt or SCORE_PROMPT
     fdir = tmp / (clip.stem + "_score")
     fdir.mkdir(parents=True, exist_ok=True)
     run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(clip),
@@ -177,7 +188,7 @@ def score_clip(client, model: str, clip: Path, step: float, tmp: Path, workers: 
                 model=model, max_tokens=120,
                 messages=[{"role": "user", "content": [
                     {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                    {"type": "text", "text": SCORE_PROMPT}]}],
+                    {"type": "text", "text": prompt}]}],
                 output_config={"format": {"type": "json_schema", "schema": SCORE_SCHEMA}})
             txt = next((b.text for b in r.content if b.type == "text"), "{}")
             return (i * step, int(json.loads(txt)["flight"]))
@@ -352,6 +363,60 @@ def order_by_manifest(clips: list[Path], manifest: Path) -> list[Path]:
     return sorted(clips, key=lambda c: rank.get(c.name, 0), reverse=True)
 
 
+PHOTO_SCHEMA = {
+    "type": "object",
+    "properties": {"score": {"type": "integer",
+                             "description": "1-10 how striking/share-worthy this photo is."}},
+    "required": ["score"],
+    "additionalProperties": False,
+}
+
+PHOTO_PROMPT = (
+    "Rate this travel photo 1-10 for a highlight reel. 10 = striking and share-worthy "
+    "(dramatic scenery, wildlife, a beautiful or emotional moment, great light/composition); "
+    "5 = fine but ordinary; 1 = dull, blurry, cluttered, a duplicate, or a throwaway shot."
+)
+
+
+def score_photos(client, model: str, images: list, cache_dir: Path, tmp: Path,
+                 workers: int = 8, prompt: str = None) -> dict:
+    """Score photos 1-10 (cached by filename). Downscales each before sending."""
+    prompt = prompt or PHOTO_PROMPT
+    cf = cache_dir / "photo_scores.json"
+    cache = json.loads(cf.read_text()) if cf.exists() else {}
+    todo = [im for im in images if im.name not in cache]
+
+    def one(im: Path):
+        small = tmp / f"ps_{im.stem}.jpg"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(im),
+             "-vf", "scale=768:-2", "-frames:v", "1", "-q:v", "4", str(small)])
+        try:
+            b64 = base64.standard_b64encode(small.read_bytes()).decode()
+            r = client.messages.create(
+                model=model, max_tokens=80,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": prompt}]}],
+                output_config={"format": {"type": "json_schema", "schema": PHOTO_SCHEMA}})
+            txt = next((b.text for b in r.content if b.type == "text"), "{}")
+            return im.name, int(json.loads(txt)["score"])
+        except Exception:
+            return im.name, 0
+
+    if todo:
+        print(f"Scoring {len(todo)} photo(s) with {model} ...")
+        done = 0
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for name, sc in ex.map(one, todo):
+                cache[name] = sc
+                done += 1
+                if done % 25 == 0 or done == len(todo):
+                    print(f"   {done}/{len(todo)} scored", end="\r")
+        print()
+        cf.write_text(json.dumps(cache))
+    return cache
+
+
 def best_score_window(scores, dur: float, length: float) -> tuple[float, float]:
     """Best (start, mean-score) window of `length` seconds from per-frame scores."""
     if dur <= length:
@@ -442,6 +507,13 @@ def main() -> None:
                     help="A photo file or folder of photos to mix in (Ken Burns motion).")
     ap.add_argument("--photo-len", type=float, default=2.5,
                     help="Seconds per still photo (default: 2.5).")
+    ap.add_argument("--max-photos", type=int, default=0,
+                    help="Score photos and keep only the best N (0 = use all, no scoring).")
+    ap.add_argument("--add-clips", type=Path, nargs="*", default=[],
+                    help="Extra video files to include directly (trimmed to a middle window).")
+    ap.add_argument("--subject", type=str, default=None,
+                    help="Free-text 'look for' brief for scoring (e.g. 'people laughing, "
+                         "landscapes, animals, the energy of the trip'). Default: condors in flight.")
     ap.add_argument("--rescore", action="store_true",
                     help="Force re-scoring moments (ignore cached scores in output/_cache).")
     args = ap.parse_args()
@@ -450,9 +522,11 @@ def main() -> None:
     require_tools()
 
     cw_out, ch_out = (even(int(x)) for x in args.canvas.lower().split("x"))
-    clips = [p for p in args.clips.iterdir() if p.suffix.lower() in VIDEO_EXTS] \
-        if args.clips.is_dir() else [args.clips]
-    if not clips:
+    clips = []
+    if args.clips and args.clips.exists():
+        clips = [p for p in args.clips.iterdir() if p.suffix.lower() in VIDEO_EXTS] \
+            if args.clips.is_dir() else [args.clips]
+    if not clips and not args.add_clips and not args.photos:
         sys.exit(f"No clips found in {args.clips}")
     clips = order_by_manifest(clips, args.manifest)
     if args.max_clips > 0:
@@ -497,7 +571,8 @@ def main() -> None:
             if scores is None:
                 if client is None:
                     client = anthropic.Anthropic()
-                scores = score_clip(client, args.model, c, args.step, frames_tmp)
+                scores = score_clip(client, args.model, c, args.step, frames_tmp,
+                                    prompt=criteria_prompt(args.subject, "video frame"))
                 (cache_dir / f"{c.stem}.scores.json").write_text(json.dumps(
                     {"step": args.step, "scores": [[round(t, 3), v] for t, v in scores]}))
                 source = "scored via API"
@@ -514,8 +589,8 @@ def main() -> None:
                     candidates.append((sum(pts) / len(pts) if pts else 0.0, c, s, WIN, w, h))
                     s += 0.5
 
-        if not candidates:
-            sys.exit("No scorable moments found.")
+        if not candidates and not args.add_clips and not args.photos:
+            sys.exit("Nothing to build.")
 
         # Optionally feature a hero clip: lead with its best window, given more time.
         featured = None
@@ -564,11 +639,32 @@ def main() -> None:
                                args.pop, args.spotlight, st, du):
                 normalized.append(outn)
 
-        # Still photos -> Ken Burns clips, mixed in among the video highlights.
+        # Extra videos included directly (no scoring), trimmed to a middle window.
+        for i, extra in enumerate(args.add_clips):
+            ew, eh, edur = probe_dims(extra)
+            if not ew:
+                print(f"  ! {extra.name}: can't read, skipping")
+                continue
+            elen = min(args.clip_len, edur)
+            est = max(0.0, (edur - elen) / 2.0)
+            outn = norm_tmp / f"add_{i:02d}.mp4"
+            if build_zoom_clip(extra, [(0.0, 0.5, 0.5)], ew, eh, args.zoom, cw_out, ch_out, outn,
+                               args.pop, args.spotlight, est, elen):
+                normalized.append(outn)
+                print(f"+ added video {extra.name}")
+
+        # Still photos -> Ken Burns clips. Score & keep the best N if --max-photos.
         photo_clips = []
         if args.photos:
             photos = ([args.photos] if args.photos.is_file()
                       else sorted(p for p in args.photos.iterdir() if p.suffix.lower() in IMAGE_EXTS))
+            if args.max_photos and len(photos) > args.max_photos:
+                if client is None:
+                    client = anthropic.Anthropic()
+                pscores = score_photos(client, args.model, photos, cache_dir, frames_tmp,
+                                       prompt=criteria_prompt(args.subject, "photo"))
+                photos = sorted(photos, key=lambda p: pscores.get(p.name, 0), reverse=True)[: args.max_photos]
+                print(f"Kept top {len(photos)} photo(s) by score.")
             for i, ph in enumerate(photos):
                 outp = norm_tmp / f"kb_{i:02d}.mp4"
                 if build_kenburns_clip(ph, outp, args.photo_len, cw_out, ch_out,
