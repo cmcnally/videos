@@ -234,17 +234,16 @@ def main() -> None:
     ap.add_argument("--manifest", type=Path, default=Path("./output/manifest.csv"),
                     help="Manifest for best-first ordering (default: ./output/manifest.csv).")
     ap.add_argument("--out", type=Path, default=Path("./output/reel.mp4"), help="Output reel path.")
-    ap.add_argument("--zoom", type=float, default=2.2, help="Punch-in factor (default: 2.2).")
+    ap.add_argument("--zoom", type=float, default=1.4,
+                    help="Punch-in factor (default: 1.4; 1.0 = full frame, higher = tighter but softer).")
     ap.add_argument("--step", type=float, default=1.0, help="Seconds between tracking samples (default: 1).")
-    ap.add_argument("--canvas", default="1920x1080", help="Output WxH (default: 1920x1080).")
+    ap.add_argument("--canvas", default="1080x1920", help="Output WxH (default: 1080x1920, vertical 9:16).")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"Claude model (default: {DEFAULT_MODEL}).")
     ap.add_argument("--transition", type=float, default=0.7,
                     help="Cross-fade seconds between clips, and fade in/out (0 = hard cuts). Default 0.7.")
     ap.add_argument("--music", type=Path, help="Audio file to lay under the reel (looped, faded).")
-    ap.add_argument("--keep-normalized", action="store_true",
-                    help="Keep the per-clip zoomed renders in output/_normalized for reuse.")
-    ap.add_argument("--stitch-only", action="store_true",
-                    help="Skip tracking; restitch existing output/_normalized clips (fast; for tweaking edit/music).")
+    ap.add_argument("--retrack", action="store_true",
+                    help="Force re-running condor tracking (ignore cached tracking in output/_cache).")
     args = ap.parse_args()
 
     load_env_file()
@@ -261,48 +260,57 @@ def main() -> None:
         print(f"  - {c.name}")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    persist = args.keep_normalized or args.stitch_only
-    norm_dir = (args.out.parent / "_normalized") if persist else Path(tempfile.mkdtemp(prefix="reel_norm_"))
-    norm_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir = args.out.parent / "_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
     frames_tmp = Path(tempfile.mkdtemp(prefix="reel_frames_"))
+    norm_tmp = Path(tempfile.mkdtemp(prefix="reel_norm_"))
+
+    def cached_centers(clip: Path):
+        cf = cache_dir / f"{clip.stem}.centers.json"
+        if cf.exists() and not args.retrack:
+            d = json.loads(cf.read_text())
+            if abs(d.get("step", -1) - args.step) < 1e-6:
+                return [(t, cx, cy) for t, cx, cy in d["centers"]]
+        return None
+
+    need_track = any(cached_centers(c) is None for c in clips)
+    client = anthropic.Anthropic() if need_track else None
+    if not need_track:
+        print("\n(using cached condor tracking — no API calls)")
 
     normalized: list[Path] = []
     try:
-        if args.stitch_only:
-            normalized = [norm_dir / f"norm_{c.stem}.mp4" for c in clips
-                          if (norm_dir / f"norm_{c.stem}.mp4").exists()]
-            if not normalized:
-                sys.exit(f"No normalized clips in {norm_dir}; run once without --stitch-only first.")
-            print(f"\nReusing {len(normalized)} normalized clip(s) (--stitch-only).")
-        else:
-            client = anthropic.Anthropic()
-            for c in clips:
-                print(f"\n== {c.name}: locating condor + zooming ...")
-                w, h, _ = probe_dims(c)
-                if not w or not h:
-                    print("  ! couldn't probe dimensions, skipping")
-                    continue
+        for c in clips:
+            w, h, _ = probe_dims(c)
+            if not w or not h:
+                print(f"  ! {c.name}: couldn't probe dimensions, skipping")
+                continue
+            centers = cached_centers(c)
+            if centers is None:
+                print(f"\n== {c.name}: locating condor ...")
                 centers = sample_centers(client, args.model, c, args.step, frames_tmp)
-                outn = norm_dir / f"norm_{c.stem}.mp4"
-                if build_zoom_clip(c, centers, w, h, args.zoom, cw_out, ch_out, outn):
-                    normalized.append(outn)
-                    print(f"  ok ({len(centers)} tracking points)")
-            if not normalized:
-                sys.exit("No clips processed.")
+                (cache_dir / f"{c.stem}.centers.json").write_text(json.dumps(
+                    {"step": args.step,
+                     "centers": [[round(t, 3), round(cx, 4), round(cy, 4)] for t, cx, cy in centers]}))
+            else:
+                print(f"== {c.name}: cached tracking")
+            outn = norm_tmp / f"norm_{c.stem}.mp4"
+            if build_zoom_clip(c, centers, w, h, args.zoom, cw_out, ch_out, outn):
+                normalized.append(outn)
+        if not normalized:
+            sys.exit("No clips processed.")
 
-        print(f"\nStitching reel (transition={args.transition}s"
+        print(f"\nStitching reel ({args.canvas}, zoom {args.zoom}, transition {args.transition}s"
               f"{', music' if args.music else ''}) ...")
         if not build_reel(normalized, args.out, args.transition, args.music):
             sys.exit("Reel build failed.")
     finally:
         shutil.rmtree(frames_tmp, ignore_errors=True)
-        if not persist:
-            shutil.rmtree(norm_dir, ignore_errors=True)
+        shutil.rmtree(norm_tmp, ignore_errors=True)
 
     dur = probe_dims(args.out)[2]
     print(f"\nDone. Reel: {args.out}  ({len(normalized)} clips, {dur:.1f}s, {args.canvas})")
-    if persist:
-        print(f"Normalized clips kept in {norm_dir} — re-edit fast with --stitch-only.")
+    print("Tracking cached in output/_cache — re-edit framing/zoom/music instantly (no API cost).")
 
 
 if __name__ == "__main__":

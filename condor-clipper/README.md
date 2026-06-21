@@ -67,13 +67,22 @@ After clipping, stitch the keepers into one marketing reel with a Claude-tracked
 zoom that follows the condor (so a tiny bird in a wide shot reads on screen):
 
 ```bash
-python make_reel.py                          # uses ./output/clips + manifest, best-first
-python make_reel.py --zoom 2.5 --step 0.5    # tighter punch-in, smoother tracking
+python make_reel.py                          # vertical 9:16, best-first, cross-faded
+python make_reel.py --zoom 1.0               # no punch-in (full native resolution)
+python make_reel.py --music ~/song.mp3       # lay a music bed under it
+python make_reel.py --canvas 1920x1080       # landscape instead
 ```
 
-Output: `output/reel.mp4` (1080p, clips ordered by interest, silent so you can
-drop in music). Flags: `--zoom` punch-in factor, `--step` tracking sample rate,
-`--canvas WxH`, `--out`.
+Output: `output/reel.mp4` — vertical **1080×1920** by default, clips ordered by
+interest, cross-faded with fade in/out to black.
+
+Tracking is **cached** in `output/_cache`, so after the first run you can re-edit
+framing, zoom, transitions, or music instantly with **no API cost**. Use
+`--retrack` to force fresh tracking.
+
+Flags: `--zoom` punch-in (1.0 = full frame, higher = tighter but softer),
+`--canvas WxH`, `--transition` cross-fade seconds, `--music`, `--step` tracking
+sample rate, `--out`.
 
 ## Cost note
 
