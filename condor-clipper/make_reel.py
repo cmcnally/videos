@@ -298,9 +298,11 @@ def pick_layout(n: int, rng) -> list:
 
 
 def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, ch: int,
-                    pop: float, spotlight: float, gutter: int = 12, border: str = "white") -> bool:
+                    pop: float, spotlight: float, gutter: int = 12, border: str = "white",
+                    fit: str = "contain") -> bool:
     """Place photos into arbitrary cell rectangles (magazine-style). Each gets a `gutter`-px
-    `border` frame and slides + fades in, staggered, for energetic motion."""
+    `border` frame and slides + fades in, staggered, for energetic motion.
+    fit="contain" shows the whole photo (matted, never cut off); "cover" fills/crops the cell."""
     n = min(len(images), len(cells))
     images, cells = images[:n], cells[:n]
     g = max(0, gutter)
@@ -314,9 +316,14 @@ def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, c
         cwi, chi = even(fw * cw), even(fh * ch)
         iw, ih = max(2, even(cwi - 2 * g)), max(2, even(chi - 2 * g))
         delay = round(0.10 + i * 0.15, 3)
-        fc.append(f"[{i}]scale={iw}:{ih}:force_original_aspect_ratio=increase,crop={iw}:{ih},"
-                  f"pad={cwi}:{chi}:{(cwi - iw) // 2}:{(chi - ih) // 2}:color={border},setsar=1,"
-                  f"format=yuva420p,fade=t=in:st={delay}:d=0.35:alpha=1[c{i}]")
+        if fit == "cover":  # fill the cell, cropping overflow
+            sizing = (f"scale={iw}:{ih}:force_original_aspect_ratio=increase,crop={iw}:{ih},"
+                      f"pad={cwi}:{chi}:{(cwi - iw) // 2}:{(chi - ih) // 2}:color={border}")
+        else:               # contain: whole photo shown, matted with the border color
+            sizing = (f"scale={iw}:{ih}:force_original_aspect_ratio=decrease,"
+                      f"pad={cwi}:{chi}:(ow-iw)/2:(oh-ih)/2:color={border}")
+        fc.append(f"[{i}]{sizing},setsar=1,format=yuva420p,"
+                  f"fade=t=in:st={delay}:d=0.35:alpha=1[c{i}]")
         rects.append((cx, cy, delay))
     dirs = [(0, 70), (70, 0), (0, -70), (-70, 0)]  # slide from bottom / right / top / left
     cur = "[bg]"
@@ -611,6 +618,9 @@ def main() -> None:
                     help="Border/gutter px between photos in grid collages (0 = none). Default 12.")
     ap.add_argument("--gutter-color", type=str, default="white",
                     help="Color of the grid border/gutter (default: white).")
+    ap.add_argument("--grid-fit", choices=["contain", "cover"], default="contain",
+                    help="contain = whole photo shown/matted (never cut off); "
+                         "cover = fill the cell, cropping overflow. Default contain.")
     ap.add_argument("--add-clips", type=Path, nargs="*", default=[],
                     help="Extra video files to include directly (trimmed to a middle window).")
     ap.add_argument("--subject", type=str, default=None,
@@ -862,7 +872,8 @@ def main() -> None:
                 else:
                     cells = pick_layout(k, rng)
                     ok = build_grid_clip(group, cells, outp, d, cw_out, ch_out,
-                                         args.pop, args.spotlight, args.gutter, args.gutter_color)
+                                         args.pop, args.spotlight, args.gutter,
+                                         args.gutter_color, args.grid_fit)
                 if ok:
                     photo_items.append((capture_dt(group[0]), outp))
                 i += k
