@@ -178,7 +178,7 @@ def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
     vf = ",".join(filters)
     cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(video),
               "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-              "-movflags", "+faststart", str(out)])
+              "-pix_fmt", "yuv420p", "-color_range", "tv", "-movflags", "+faststart", str(out)])
     if cp.returncode != 0:
         print(f"  ! zoom failed for {video.name}: {cp.stderr.strip()[:200]}", file=sys.stderr)
         return False
@@ -209,7 +209,8 @@ def build_reel(normalized: list[Path], out: Path, transition: float, music: Path
 
     fdur = fade if fade > 0 else 0.5
     fo_st = max(0.0, total - fdur)
-    fc.append(f"{cur}fade=t=in:st=0:d={fdur:.2f},fade=t=out:st={fo_st:.3f}:d={fdur:.2f}[vout]")
+    fc.append(f"{cur}fade=t=in:st=0:d={fdur:.2f},fade=t=out:st={fo_st:.3f}:d={fdur:.2f},"
+              f"format=yuv420p[vout]")
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs]
     maps = ["-map", "[vout]"]
@@ -222,7 +223,7 @@ def build_reel(normalized: list[Path], out: Path, transition: float, music: Path
 
     cmd += ["-filter_complex", ";".join(fc), *maps,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
+            "-pix_fmt", "yuv420p", "-color_range", "tv", "-movflags", "+faststart", str(out)]
     cp = run(cmd)
     if cp.returncode != 0:
         print(f"stitch failed: {cp.stderr.strip()[:300]}", file=sys.stderr)
