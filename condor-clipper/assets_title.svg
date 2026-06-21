@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="scrim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000000" stop-opacity="0.10"/>
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.72"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1080" height="1920" fill="url(#scrim)"/>
+
+  <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif" fill="#ffffff" text-anchor="middle">
+    <text x="540" y="1530" font-size="84" font-weight="700" letter-spacing="3"
+          style="paint-order:stroke" stroke="#000000" stroke-opacity="0.25" stroke-width="2">SOUTHERN PATAGONIA</text>
+    <line x1="430" y1="1576" x2="650" y2="1576" stroke="#ffffff" stroke-opacity="0.8" stroke-width="3"/>
+    <text x="540" y="1640" font-size="44" font-weight="400" letter-spacing="10" fill-opacity="0.92">NOVEMBER 2025</text>
+  </g>
+</svg>
