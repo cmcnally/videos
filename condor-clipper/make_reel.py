@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import anthropic
@@ -140,6 +141,56 @@ def piecewise(times: list[float], vals: list[float]) -> str:
     return f"if(lt(t,{times[0]:.3f}),{vals[0]:.1f},{expr})"
 
 
+SCORE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "flight": {"type": "integer",
+                   "description": "1-10 how striking this frame is as a condor in flight against "
+                                  "scenery (mountains/sky/lake). 10 = dramatic soaring + beautiful "
+                                  "landscape; 5 = condor present but ordinary; 1 = no condor or dull."}
+    },
+    "required": ["flight"],
+    "additionalProperties": False,
+}
+
+SCORE_PROMPT = (
+    "Rate this video frame 1-10 as a highlight of a CONDOR IN FLIGHT against scenery (mountains, "
+    "sky, lake). 10 = the condor is clearly soaring/gliding with wings spread in a beautiful "
+    "landscape; 5 = a condor is present but the shot is ordinary; 1 = no condor visible, or the "
+    "frame is dull, blurry, or just empty landscape. Reward dramatic flight and great backdrops."
+)
+
+
+def score_clip(client, model: str, clip: Path, step: float, tmp: Path, workers: int = 8):
+    """Return [(t, flight_score 1-10)] sampled across the clip."""
+    fdir = tmp / (clip.stem + "_score")
+    fdir.mkdir(parents=True, exist_ok=True)
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(clip),
+         "-vf", f"fps=1/{step},scale=768:-2", "-q:v", "4", str(fdir / "f_%04d.jpg")])
+    frames = sorted(fdir.glob("f_*.jpg"))
+
+    def one(i: int, f: Path):
+        b64 = base64.standard_b64encode(f.read_bytes()).decode()
+        try:
+            r = client.messages.create(
+                model=model, max_tokens=120,
+                messages=[{"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                    {"type": "text", "text": SCORE_PROMPT}]}],
+                output_config={"format": {"type": "json_schema", "schema": SCORE_SCHEMA}})
+            txt = next((b.text for b in r.content if b.type == "text"), "{}")
+            return (i * step, int(json.loads(txt)["flight"]))
+        except (anthropic.APIError, json.JSONDecodeError, KeyError, ValueError, TypeError):
+            return (i * step, 0)
+
+    scores: list = [None] * len(frames)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(one, i, f): i for i, f in enumerate(frames)}
+        for fut in as_completed(futs):
+            scores[futs[fut]] = fut.result()
+    return [s for s in scores if s]
+
+
 def best_window(centers, clip_dur: float, win_len: float) -> tuple[float, float]:
     """Pick the most dynamic win_len-second window (most condor motion = liveliest).
     Falls back to the middle of the clip when tracking is flat/missing."""
@@ -189,10 +240,10 @@ def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
 
     filters = [f"crop={win_w}:{win_h}:x={xexpr}:y={yexpr}",
                f"scale={cw_out}:{ch_out}:flags=lanczos", "setsar=1"]
-    if pop > 0:  # the "pop" grade: punchier contrast/saturation + sharpen the bird
-        filters.append(f"eq=contrast={1 + 0.14 * pop:.3f}:saturation={1 + 0.22 * pop:.3f}:"
-                       f"brightness={0.01 * pop:.3f}")
-        filters.append(f"unsharp=5:5:{0.9 * pop:.3f}:5:5:0.0")
+    if pop > 0:  # bright + vibrant "pop": lift brightness/midtones, richer color, sharpen
+        filters.append(f"eq=contrast={1 + 0.10 * pop:.3f}:brightness={0.06 * pop:.3f}:"
+                       f"saturation={1 + 0.30 * pop:.3f}:gamma={1 + 0.06 * pop:.3f}")
+        filters.append(f"unsharp=5:5:{0.8 * pop:.3f}:5:5:0.0")
     if spotlight > 0:  # centered vignette = spotlight that follows the (centered) bird
         filters.append(f"vignette=angle={0.6 + 0.6 * spotlight:.3f}")
     filters += ["fps=30", "format=yuv420p"]
@@ -265,6 +316,33 @@ def order_by_manifest(clips: list[Path], manifest: Path) -> list[Path]:
     return sorted(clips, key=lambda c: rank.get(c.name, 0), reverse=True)
 
 
+def scores_from_detections(clip_name: str, manifest: Path, out_dir: Path, clip_dur: float):
+    """Reuse the clipper's per-frame 'interesting' scores (no API). Maps the clip back to
+    its source via the manifest and reads detections_<source>.csv. Non-condor frames -> 0."""
+    if not manifest.exists():
+        return None
+    info = None
+    with manifest.open() as fh:
+        for row in csv.DictReader(fh):
+            if Path(row.get("clip_file", "")).name == clip_name:
+                info = row
+                break
+    if not info:
+        return None
+    det = out_dir / f"detections_{Path(info['source_file']).stem}.csv"
+    if not det.exists():
+        return None
+    start = float(info.get("start_sec", 0) or 0)
+    scores = []
+    with det.open() as fh:
+        for row in csv.DictReader(fh):
+            t = float(row["timestamp_sec"])
+            rel = t - start
+            if -1e-6 <= rel <= clip_dur + 2.0:
+                scores.append((rel, int(row["interesting"]) if row.get("is_condor") == "True" else 0))
+    return scores or None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Stitch condor clips into a tracking-zoom highlight reel.")
     ap.add_argument("clips", nargs="?", type=Path, default=Path("./output/clips"),
@@ -282,14 +360,18 @@ def main() -> None:
     ap.add_argument("--music", type=Path, help="Audio file to lay under the reel (looped, faded).")
     ap.add_argument("--pop", type=float, default=1.0,
                     help="Grade intensity: contrast/saturation/sharpness (0 = off, 1 = default, 2 = bold).")
-    ap.add_argument("--spotlight", type=float, default=0.6,
-                    help="Spotlight/vignette on the (centered) condor, 0-1 (0 = off). Default 0.6.")
-    ap.add_argument("--clip-len", type=float, default=3.5,
-                    help="Seconds of each clip's best window to keep (0 = whole clip). Default 3.5.")
-    ap.add_argument("--max-clips", type=int, default=6,
-                    help="Use at most this many clips, best-first (default: 6).")
-    ap.add_argument("--retrack", action="store_true",
-                    help="Force re-running condor tracking (ignore cached tracking in output/_cache).")
+    ap.add_argument("--spotlight", type=float, default=0.0,
+                    help="Spotlight/vignette strength, 0-1 (0 = off, brighter). Default 0.")
+    ap.add_argument("--clip-len", type=float, default=3.0,
+                    help="Length of each highlight window, seconds (default: 3.0).")
+    ap.add_argument("--target", type=float, default=21.0,
+                    help="Target total seconds of highlights before transitions (default: 21 -> ~17s reel).")
+    ap.add_argument("--max-clips", type=int, default=0,
+                    help="Only consider this many source clips, best-first (0 = all).")
+    ap.add_argument("--per-clip-max", type=int, default=2,
+                    help="Max highlights taken from any one clip, for variety (default: 2).")
+    ap.add_argument("--rescore", action="store_true",
+                    help="Force re-scoring moments (ignore cached scores in output/_cache).")
     args = ap.parse_args()
 
     load_env_file()
@@ -303,10 +385,8 @@ def main() -> None:
     clips = order_by_manifest(clips, args.manifest)
     if args.max_clips > 0:
         clips = clips[: args.max_clips]
-    print(f"Building reel from {len(clips)} clip(s), best-first"
-          f"{f', best {args.clip_len}s of each' if args.clip_len else ''}:")
-    for c in clips:
-        print(f"  - {c.name}")
+    print(f"Scanning {len(clips)} clip(s) for the best ~{args.clip_len}s flight moments "
+          f"(target ~{args.target:.0f}s):")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     cache_dir = args.out.parent / "_cache"
@@ -314,48 +394,77 @@ def main() -> None:
     frames_tmp = Path(tempfile.mkdtemp(prefix="reel_frames_"))
     norm_tmp = Path(tempfile.mkdtemp(prefix="reel_norm_"))
 
-    def cached_centers(clip: Path):
-        cf = cache_dir / f"{clip.stem}.centers.json"
-        if cf.exists() and not args.retrack:
+    WIN = args.clip_len
+
+    def cached_scores(clip: Path):
+        cf = cache_dir / f"{clip.stem}.scores.json"
+        if cf.exists() and not args.rescore:
             d = json.loads(cf.read_text())
             if abs(d.get("step", -1) - args.step) < 1e-6:
-                return [(t, cx, cy) for t, cx, cy in d["centers"]]
+                return [(t, v) for t, v in d["scores"]]
         return None
 
-    need_track = any(cached_centers(c) is None for c in clips)
-    client = anthropic.Anthropic() if need_track else None
-    if not need_track:
-        print("\n(using cached condor tracking — no API calls)")
+    client = None
 
     normalized: list[Path] = []
     try:
+        # Score every clip (reusing the clipper's per-frame scores when available, so no
+        # new API calls), then build candidate highlight windows across all of them.
+        candidates = []  # (score, clip, start, dur, w, h)
         for c in clips:
-            w, h, clip_dur = probe_dims(c)
+            w, h, dur = probe_dims(c)
             if not w or not h:
                 print(f"  ! {c.name}: couldn't probe dimensions, skipping")
                 continue
-            centers = cached_centers(c)
-            if centers is None:
-                print(f"\n== {c.name}: locating condor ...")
-                centers = sample_centers(client, args.model, c, args.step, frames_tmp)
-                (cache_dir / f"{c.stem}.centers.json").write_text(json.dumps(
-                    {"step": args.step,
-                     "centers": [[round(t, 3), round(cx, 4), round(cy, 4)] for t, cx, cy in centers]}))
+            scores = cached_scores(c)
+            source = "cached scores"
+            if scores is None:
+                scores = scores_from_detections(c.name, args.manifest, cache_dir.parent, dur)
+                source = "clipper scores (no API)"
+            if scores is None:
+                if client is None:
+                    client = anthropic.Anthropic()
+                scores = score_clip(client, args.model, c, args.step, frames_tmp)
+                (cache_dir / f"{c.stem}.scores.json").write_text(json.dumps(
+                    {"step": args.step, "scores": [[round(t, 3), v] for t, v in scores]}))
+                source = "scored via API"
+            print(f"== {c.name}: {source}")
+            if not scores:
+                continue
+            if dur <= WIN:
+                candidates.append((sum(v for _, v in scores) / len(scores), c, 0.0, dur, w, h))
             else:
-                print(f"== {c.name}: cached tracking")
+                s = 0.0
+                while s <= dur - WIN + 1e-6:
+                    pts = [v for t, v in scores if s - 1e-6 <= t <= s + WIN + 1e-6]
+                    candidates.append((sum(pts) / len(pts) if pts else 0.0, c, s, WIN, w, h))
+                    s += 0.5
 
-            # Trim each clip to its most dynamic window, and rebase tracking to it.
-            if args.clip_len and clip_dur > args.clip_len:
-                wstart, wdur = best_window(centers, clip_dur, args.clip_len)
-                wcenters = [(t - wstart, cx, cy) for t, cx, cy in centers
-                            if wstart - 1e-6 <= t <= wstart + wdur + 1e-6] or [(0.0, 0.5, 0.5)]
-                print(f"   best {wdur:.1f}s window @ {wstart:.1f}s")
-            else:
-                wstart, wdur, wcenters = 0.0, None, centers
+        if not candidates:
+            sys.exit("No scorable moments found.")
 
-            outn = norm_tmp / f"norm_{c.stem}.mp4"
-            if build_zoom_clip(c, wcenters, w, h, args.zoom, cw_out, ch_out, outn,
-                               args.pop, args.spotlight, wstart, wdur):
+        # Greedily pick the best non-overlapping windows (multiple per clip allowed).
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        selected, used, total = [], {}, 0.0
+        for sc, c, st, du, w, h in candidates:
+            if total >= args.target:
+                break
+            if len(used.get(c.name, [])) >= args.per_clip_max:
+                continue  # already took enough from this clip — spread for variety
+            if any(not (st + du <= a or st >= b) for a, b in used.get(c.name, [])):
+                continue  # overlaps a window already chosen from this clip
+            selected.append((sc, c, st, du, w, h))
+            used.setdefault(c.name, []).append((st, st + du))
+            total += du
+        selected.sort(key=lambda x: x[0], reverse=True)  # best moment first
+        print(f"\nSelected {len(selected)} highlight(s) (~{total:.0f}s) from {len(used)} clip(s):")
+        for sc, c, st, du, _, _ in selected:
+            print(f"  - {c.name} @ {st:.1f}-{st + du:.1f}s  (flight {sc:.1f}/10)")
+
+        for i, (sc, c, st, du, w, h) in enumerate(selected):
+            outn = norm_tmp / f"norm_{i:02d}_{c.stem}.mp4"
+            if build_zoom_clip(c, [(0.0, 0.5, 0.5)], w, h, args.zoom, cw_out, ch_out, outn,
+                               args.pop, args.spotlight, st, du):
                 normalized.append(outn)
         if not normalized:
             sys.exit("No clips processed.")
