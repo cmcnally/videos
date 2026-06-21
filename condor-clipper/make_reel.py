@@ -170,6 +170,51 @@ def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
     return True
 
 
+def build_reel(normalized: list[Path], out: Path, transition: float, music: Path | None) -> bool:
+    """Stitch normalized clips with cross-fades, fade in/out to black, optional music."""
+    durs = [probe_dims(p)[2] for p in normalized]
+    n = len(normalized)
+    fade = max(0.0, transition)
+    inputs: list[str] = []
+    for p in normalized:
+        inputs += ["-i", str(p)]
+
+    fc: list[str] = []
+    if n > 1 and fade > 0:
+        cur, total = "[0:v]", durs[0]
+        for j in range(1, n):
+            off = max(0.0, total - fade)
+            lab = f"[vx{j}]"
+            fc.append(f"{cur}[{j}:v]xfade=transition=fade:duration={fade:.3f}:offset={off:.3f}{lab}")
+            cur, total = lab, total + durs[j] - fade
+    else:
+        joined = "".join(f"[{i}:v]" for i in range(n))
+        fc.append(f"{joined}concat=n={n}:v=1:a=0[vc]")
+        cur, total = "[vc]", sum(durs)
+
+    fdur = fade if fade > 0 else 0.5
+    fo_st = max(0.0, total - fdur)
+    fc.append(f"{cur}fade=t=in:st=0:d={fdur:.2f},fade=t=out:st={fo_st:.3f}:d={fdur:.2f}[vout]")
+
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs]
+    maps = ["-map", "[vout]"]
+    if music and music.exists():
+        cmd += ["-stream_loop", "-1", "-i", str(music)]
+        fc.append(f"[{n}:a]afade=t=in:st=0:d=1.5,afade=t=out:st={fo_st:.3f}:d={fdur:.2f}[aout]")
+        maps += ["-map", "[aout]", "-shortest"]
+    else:
+        maps += ["-an"]
+
+    cmd += ["-filter_complex", ";".join(fc), *maps,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
+    cp = run(cmd)
+    if cp.returncode != 0:
+        print(f"stitch failed: {cp.stderr.strip()[:300]}", file=sys.stderr)
+        return False
+    return True
+
+
 def order_by_manifest(clips: list[Path], manifest: Path) -> list[Path]:
     if not manifest.exists():
         return sorted(clips)
@@ -193,6 +238,13 @@ def main() -> None:
     ap.add_argument("--step", type=float, default=1.0, help="Seconds between tracking samples (default: 1).")
     ap.add_argument("--canvas", default="1920x1080", help="Output WxH (default: 1920x1080).")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"Claude model (default: {DEFAULT_MODEL}).")
+    ap.add_argument("--transition", type=float, default=0.7,
+                    help="Cross-fade seconds between clips, and fade in/out (0 = hard cuts). Default 0.7.")
+    ap.add_argument("--music", type=Path, help="Audio file to lay under the reel (looped, faded).")
+    ap.add_argument("--keep-normalized", action="store_true",
+                    help="Keep the per-clip zoomed renders in output/_normalized for reuse.")
+    ap.add_argument("--stitch-only", action="store_true",
+                    help="Skip tracking; restitch existing output/_normalized clips (fast; for tweaking edit/music).")
     args = ap.parse_args()
 
     load_env_file()
@@ -208,37 +260,49 @@ def main() -> None:
     for c in clips:
         print(f"  - {c.name}")
 
-    client = anthropic.Anthropic()
-    tmp = Path(tempfile.mkdtemp(prefix="reel_"))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    persist = args.keep_normalized or args.stitch_only
+    norm_dir = (args.out.parent / "_normalized") if persist else Path(tempfile.mkdtemp(prefix="reel_norm_"))
+    norm_dir.mkdir(parents=True, exist_ok=True)
+    frames_tmp = Path(tempfile.mkdtemp(prefix="reel_frames_"))
+
     normalized: list[Path] = []
     try:
-        for c in clips:
-            print(f"\n== {c.name}: locating condor + zooming ...")
-            w, h, _ = probe_dims(c)
-            if not w or not h:
-                print("  ! couldn't probe dimensions, skipping")
-                continue
-            centers = sample_centers(client, args.model, c, args.step, tmp)
-            outn = tmp / f"norm_{c.stem}.mp4"
-            if build_zoom_clip(c, centers, w, h, args.zoom, cw_out, ch_out, outn):
-                normalized.append(outn)
-                print(f"  ok ({len(centers)} tracking points)")
+        if args.stitch_only:
+            normalized = [norm_dir / f"norm_{c.stem}.mp4" for c in clips
+                          if (norm_dir / f"norm_{c.stem}.mp4").exists()]
+            if not normalized:
+                sys.exit(f"No normalized clips in {norm_dir}; run once without --stitch-only first.")
+            print(f"\nReusing {len(normalized)} normalized clip(s) (--stitch-only).")
+        else:
+            client = anthropic.Anthropic()
+            for c in clips:
+                print(f"\n== {c.name}: locating condor + zooming ...")
+                w, h, _ = probe_dims(c)
+                if not w or not h:
+                    print("  ! couldn't probe dimensions, skipping")
+                    continue
+                centers = sample_centers(client, args.model, c, args.step, frames_tmp)
+                outn = norm_dir / f"norm_{c.stem}.mp4"
+                if build_zoom_clip(c, centers, w, h, args.zoom, cw_out, ch_out, outn):
+                    normalized.append(outn)
+                    print(f"  ok ({len(centers)} tracking points)")
+            if not normalized:
+                sys.exit("No clips processed.")
 
-        if not normalized:
-            sys.exit("No clips processed.")
-
-        listfile = tmp / "concat.txt"
-        listfile.write_text("".join(f"file '{p}'\n" for p in normalized))
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat",
-                  "-safe", "0", "-i", str(listfile), "-c", "copy", str(args.out)])
-        if cp.returncode != 0:
-            sys.exit(f"concat failed: {cp.stderr.strip()[:300]}")
+        print(f"\nStitching reel (transition={args.transition}s"
+              f"{', music' if args.music else ''}) ...")
+        if not build_reel(normalized, args.out, args.transition, args.music):
+            sys.exit("Reel build failed.")
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(frames_tmp, ignore_errors=True)
+        if not persist:
+            shutil.rmtree(norm_dir, ignore_errors=True)
 
     dur = probe_dims(args.out)[2]
     print(f"\nDone. Reel: {args.out}  ({len(normalized)} clips, {dur:.1f}s, {args.canvas})")
+    if persist:
+        print(f"Normalized clips kept in {norm_dir} — re-edit fast with --stitch-only.")
 
 
 if __name__ == "__main__":
