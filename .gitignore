@@ -1,0 +1,26 @@
+# Python virtual environments
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# Tool outputs (clips, manifests, sampled frames)
+**/output/
+
+# Source / exported footage — keep large media out of git
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+*.webm
+*.mts
+*.m2ts
+*.jpg
+*.jpeg
+*.png
+
+# Secrets
+.env
+
+# OS cruft
+.DS_Store
