@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+  <defs>
+    <linearGradient id="ocean" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b6f8f"/>
+      <stop offset="1" stop-color="#0d3f57"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff5a4d" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ff5a4d" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1080" height="1920" fill="url(#ocean)"/>
+
+  <!-- faint graticule for a map/globe feel -->
+  <g stroke="#ffffff" stroke-opacity="0.08" stroke-width="2">
+    <line x1="0" y1="480" x2="1080" y2="480"/>
+    <line x1="0" y1="800" x2="1080" y2="800"/>
+    <line x1="0" y1="1120" x2="1080" y2="1120"/>
+    <line x1="0" y1="1440" x2="1080" y2="1440"/>
+    <line x1="270" y1="0" x2="270" y2="1920"/>
+    <line x1="540" y1="0" x2="540" y2="1920"/>
+    <line x1="810" y1="0" x2="810" y2="1920"/>
+  </g>
+
+  <!-- South America (stylized low-poly silhouette) -->
+  <polygon points="430,360 640,340 770,520 825,720 800,920 740,1080 690,1240 645,1380 590,1480 525,1560 470,1450 445,1240 410,1020 378,800 400,580"
+           fill="#d8c79a" stroke="#b7a673" stroke-width="6" stroke-linejoin="round"/>
+
+  <!-- dashed flight path arcing down to the pin -->
+  <path d="M 660,300 Q 900,860 528,1372" fill="none" stroke="#ffffff" stroke-opacity="0.85"
+        stroke-width="6" stroke-dasharray="2 22" stroke-linecap="round"/>
+
+  <!-- El Calafate pin -->
+  <circle cx="520" cy="1400" r="150" fill="url(#glow)"/>
+  <path d="M520,1300 C476,1300 452,1334 452,1366 C452,1408 520,1470 520,1470 C520,1470 588,1408 588,1366 C588,1334 564,1300 520,1300 Z"
+        fill="#ff3b30" stroke="#ffffff" stroke-width="6"/>
+  <circle cx="520" cy="1366" r="22" fill="#ffffff"/>
+
+  <!-- label -->
+  <text x="540" y="1560" text-anchor="middle" font-family="Helvetica, Arial, sans-serif"
+        font-size="62" font-weight="700" fill="#ffffff" letter-spacing="2">EL CALAFATE</text>
+  <text x="540" y="1612" text-anchor="middle" font-family="Helvetica, Arial, sans-serif"
+        font-size="34" font-weight="400" fill="#ffffff" fill-opacity="0.85" letter-spacing="6">PATAGONIA · ARGENTINA</text>
+</svg>

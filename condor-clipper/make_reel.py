@@ -643,6 +643,9 @@ def main() -> None:
                     help="Only consider this many source clips, best-first (0 = all).")
     ap.add_argument("--per-clip-max", type=int, default=2,
                     help="Max highlights taken from any one clip, for variety (default: 2).")
+    ap.add_argument("--intro", type=Path,
+                    help="A pre-rendered intro clip prepended as the very first segment "
+                         "(e.g. a map zoom). Should match the canvas size/fps.")
     ap.add_argument("--feature", type=str,
                     help="Lead the reel with the clip whose name contains this text (the hero shot).")
     ap.add_argument("--feature-len", type=float, default=5.0,
@@ -941,6 +944,8 @@ def main() -> None:
                 sequence = [p for _, p in items]
         else:
             sequence = interleave([p for _, p in video_items], [p for _, p in photo_items])
+        if args.intro and args.intro.exists():  # prepend the intro (e.g. map zoom) first
+            sequence = [args.intro] + sequence
         if not sequence:
             sys.exit("Nothing to build (no usable clips or photos).")
         nseg = len(sequence)
