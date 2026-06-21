@@ -61,6 +61,20 @@ Output:
 | `--keep-frames` | off | Keep sampled JPEGs for inspection/debugging. |
 | `--dry-run` | off | Classify + report, write no clips. |
 
+## Make a highlight reel
+
+After clipping, stitch the keepers into one marketing reel with a Claude-tracked
+zoom that follows the condor (so a tiny bird in a wide shot reads on screen):
+
+```bash
+python make_reel.py                          # uses ./output/clips + manifest, best-first
+python make_reel.py --zoom 2.5 --step 0.5    # tighter punch-in, smoother tracking
+```
+
+Output: `output/reel.mp4` (1080p, clips ordered by interest, silent so you can
+drop in music). Flags: `--zoom` punch-in factor, `--step` tracking sample rate,
+`--canvas WxH`, `--out`.
+
 ## Cost note
 
 Cost scales with frames classified = total video seconds ÷ `--interval`. To
