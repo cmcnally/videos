@@ -18,6 +18,7 @@ import argparse
 import base64
 import csv
 import json
+import math
 import os
 import random
 import re
@@ -297,6 +298,48 @@ def pick_layout(n: int, rng) -> list:
     return rng.choice(LAYOUTS.get(min(n, 4), LAYOUTS[4]))
 
 
+def img_aspect(path: Path) -> float:
+    """Width/height of an image (1.0 if unknown)."""
+    cp = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+              "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(path)])
+    try:
+        w, h = cp.stdout.strip().split("x")
+        return int(w) / int(h)
+    except Exception:
+        return 1.0
+
+
+def fit_layout_and_order(group: list, cw: int, ch: int, rng):
+    """Pick the layout whose cell shapes best match the photos' shapes, and pair each
+    photo to a like-shaped cell — so cover-fill crops the least and leaves no white gaps.
+    Returns (ordered_images, ordered_cells)."""
+    n = len(group)
+    if n <= 1:
+        return group, [(0.0, 0.0, 1.0, 1.0)]
+    aspects = [img_aspect(p) for p in group]
+    pas = sorted(aspects)
+
+    def cell_ar(c):
+        return (c[2] * cw) / (c[3] * ch)
+
+    def score(layout):
+        cas = sorted(cell_ar(c) for c in layout)
+        return sum(abs(math.log(ca) - math.log(pa)) for ca, pa in zip(cas, pas))
+
+    options = sorted(LAYOUTS.get(min(n, 4), LAYOUTS[4]), key=score)
+    best = score(options[0])
+    layout = rng.choice([l for l in options if score(l) <= best + 0.12])  # variety among near-best
+    # pair widest photo -> widest cell, etc.
+    cell_rank = sorted(range(len(layout)), key=lambda j: cell_ar(layout[j]))
+    photo_rank = sorted(range(n), key=lambda j: aspects[j])
+    ordered_imgs = [None] * len(layout)
+    ordered_cells = [None] * len(layout)
+    for r in range(len(layout)):
+        ordered_cells[r] = layout[cell_rank[r]]
+        ordered_imgs[r] = group[photo_rank[r]]
+    return ordered_imgs, ordered_cells
+
+
 def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, ch: int,
                     pop: float, spotlight: float, gutter: int = 12, border: str = "white",
                     fit: str = "contain") -> bool:
@@ -316,8 +359,9 @@ def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, c
         cwi, chi = even(fw * cw), even(fh * ch)
         iw, ih = max(2, even(cwi - 2 * g)), max(2, even(chi - 2 * g))
         delay = round(0.10 + i * 0.15, 3)
-        if fit == "cover":  # fill the cell, cropping overflow
-            sizing = (f"scale={iw}:{ih}:force_original_aspect_ratio=increase,crop={iw}:{ih},"
+        if fit == "cover":  # fill the cell, cropping overflow (biased to keep the top/heads)
+            sizing = (f"scale={iw}:{ih}:force_original_aspect_ratio=increase,"
+                      f"crop={iw}:{ih}:(in_w-{iw})/2:(in_h-{ih})*0.30,"
                       f"pad={cwi}:{chi}:{(cwi - iw) // 2}:{(chi - ih) // 2}:color={border}")
         else:               # contain: whole photo shown, matted with the border color
             sizing = (f"scale={iw}:{ih}:force_original_aspect_ratio=decrease,"
@@ -618,9 +662,9 @@ def main() -> None:
                     help="Border/gutter px between photos in grid collages (0 = none). Default 12.")
     ap.add_argument("--gutter-color", type=str, default="white",
                     help="Color of the grid border/gutter (default: white).")
-    ap.add_argument("--grid-fit", choices=["contain", "cover"], default="contain",
-                    help="contain = whole photo shown/matted (never cut off); "
-                         "cover = fill the cell, cropping overflow. Default contain.")
+    ap.add_argument("--grid-fit", choices=["contain", "cover"], default="cover",
+                    help="cover = fill cells edge-to-edge (orientation-matched, top-biased crop, "
+                         "minimal cut-off); contain = whole photo matted with white. Default cover.")
     ap.add_argument("--add-clips", type=Path, nargs="*", default=[],
                     help="Extra video files to include directly (trimmed to a middle window).")
     ap.add_argument("--subject", type=str, default=None,
@@ -870,8 +914,8 @@ def main() -> None:
                     ok = build_kenburns_clip(group[0], outp, d, cw_out, ch_out,
                                              args.pop, args.spotlight, seg)
                 else:
-                    cells = pick_layout(k, rng)
-                    ok = build_grid_clip(group, cells, outp, d, cw_out, ch_out,
+                    imgs, cells = fit_layout_and_order(group, cw_out, ch_out, rng)
+                    ok = build_grid_clip(imgs, cells, outp, d, cw_out, ch_out,
                                          args.pop, args.spotlight, args.gutter,
                                          args.gutter_color, args.grid_fit)
                 if ok:
