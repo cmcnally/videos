@@ -435,6 +435,9 @@ def main() -> None:
                     help="Lead the reel with the clip whose name contains this text (the hero shot).")
     ap.add_argument("--feature-len", type=float, default=5.0,
                     help="Seconds of screen time for the featured clip (default: 5).")
+    ap.add_argument("--feature-at", type=float, default=None,
+                    help="Start the featured window at this second (e.g. 0 for a fly-in). "
+                         "Default: auto-pick the highest-scoring window.")
     ap.add_argument("--photos", type=Path,
                     help="A photo file or folder of photos to mix in (Ken Burns motion).")
     ap.add_argument("--photo-len", type=float, default=2.5,
@@ -521,7 +524,10 @@ def main() -> None:
             if fname:
                 fc, fscores, fw, fh, fdur = clip_meta[fname]
                 flen = min(args.feature_len, fdur)
-                fst, fscore = best_score_window(fscores, fdur, flen)
+                if args.feature_at is not None:
+                    fst, fscore = max(0.0, min(args.feature_at, fdur - flen)), 10.0
+                else:
+                    fst, fscore = best_score_window(fscores, fdur, flen)
                 featured = (fscore, fc, fst, flen, fw, fh)
                 print(f"Featuring {fname} @ {fst:.1f}-{fst + flen:.1f}s as the lead shot.")
             else:
