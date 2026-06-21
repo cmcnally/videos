@@ -228,8 +228,10 @@ def grade_filters(pop: float, spotlight: float) -> list[str]:
     """The shared bright/vibrant 'pop' grade (+ optional vignette), for video and photos."""
     f = []
     if pop > 0:
-        f.append(f"eq=contrast={1 + 0.10 * pop:.3f}:brightness={0.06 * pop:.3f}:"
-                 f"saturation={1 + 0.30 * pop:.3f}:gamma={1 + 0.06 * pop:.3f}")
+        f.append(f"eq=contrast={1 + 0.12 * pop:.3f}:brightness={0.05 * pop:.3f}:"
+                 f"saturation={1 + 0.42 * pop:.3f}:gamma={1 + 0.05 * pop:.3f}")
+        # vibrance lifts the muted colors more than the already-saturated ones (Animoto/Quik pop)
+        f.append(f"vibrance=intensity={min(1.0, 0.35 * pop):.3f}")
         f.append(f"unsharp=5:5:{0.8 * pop:.3f}:5:5:0.0")
     if spotlight > 0:
         f.append(f"vignette=angle={0.6 + 0.6 * spotlight:.3f}")
