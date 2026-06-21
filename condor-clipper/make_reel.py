@@ -353,6 +353,20 @@ def order_by_manifest(clips: list[Path], manifest: Path) -> list[Path]:
     return sorted(clips, key=lambda c: rank.get(c.name, 0), reverse=True)
 
 
+def best_score_window(scores, dur: float, length: float) -> tuple[float, float]:
+    """Best (start, mean-score) window of `length` seconds from per-frame scores."""
+    if dur <= length:
+        return 0.0, (sum(v for _, v in scores) / len(scores) if scores else 0.0)
+    best_start, best_sc, s = 0.0, -1.0, 0.0
+    while s <= dur - length + 1e-6:
+        pts = [v for t, v in scores if s - 1e-6 <= t <= s + length + 1e-6]
+        sc = sum(pts) / len(pts) if pts else 0.0
+        if sc > best_sc:
+            best_start, best_sc = s, sc
+        s += 0.5
+    return best_start, best_sc
+
+
 def interleave(vids: list, photos: list) -> list:
     """Mix photos in among the video highlights so they're spread through the reel."""
     out, i, j = [], 0, 0
@@ -418,6 +432,10 @@ def main() -> None:
                     help="Only consider this many source clips, best-first (0 = all).")
     ap.add_argument("--per-clip-max", type=int, default=2,
                     help="Max highlights taken from any one clip, for variety (default: 2).")
+    ap.add_argument("--feature", type=str,
+                    help="Lead the reel with the clip whose name contains this text (the hero shot).")
+    ap.add_argument("--feature-len", type=float, default=5.0,
+                    help="Seconds of screen time for the featured clip (default: 5).")
     ap.add_argument("--photos", type=Path,
                     help="A photo file or folder of photos to mix in (Ken Burns motion).")
     ap.add_argument("--photo-len", type=float, default=2.5,
@@ -463,6 +481,7 @@ def main() -> None:
         # Score every clip (reusing the clipper's per-frame scores when available, so no
         # new API calls), then build candidate highlight windows across all of them.
         candidates = []  # (score, clip, start, dur, w, h)
+        clip_meta = {}   # name -> (path, scores, w, h, dur)
         for c in clips:
             w, h, dur = probe_dims(c)
             if not w or not h:
@@ -483,6 +502,7 @@ def main() -> None:
             print(f"== {c.name}: {source}")
             if not scores:
                 continue
+            clip_meta[c.name] = (c, scores, w, h, dur)
             if dur <= WIN:
                 candidates.append((sum(v for _, v in scores) / len(scores), c, 0.0, dur, w, h))
             else:
@@ -495,9 +515,27 @@ def main() -> None:
         if not candidates:
             sys.exit("No scorable moments found.")
 
+        # Optionally feature a hero clip: lead with its best window, given more time.
+        featured = None
+        if args.feature:
+            fname = next((n for n in clip_meta if args.feature.lower() in n.lower()), None)
+            if fname:
+                fc, fscores, fw, fh, fdur = clip_meta[fname]
+                flen = min(args.feature_len, fdur)
+                fst, fscore = best_score_window(fscores, fdur, flen)
+                featured = (fscore, fc, fst, flen, fw, fh)
+                print(f"Featuring {fname} @ {fst:.1f}-{fst + flen:.1f}s as the lead shot.")
+            else:
+                print(f"  ! --feature '{args.feature}' matched no clip; ignoring.")
+
         # Greedily pick the best non-overlapping windows (multiple per clip allowed).
         candidates.sort(key=lambda x: x[0], reverse=True)
         selected, used, total = [], {}, 0.0
+        if featured:
+            _, fc, fst, flen, _, _ = featured
+            selected.append(featured)
+            used.setdefault(fc.name, []).append((fst, fst + flen))
+            total += flen
         for sc, c, st, du, w, h in candidates:
             if total >= args.target:
                 break
@@ -508,7 +546,9 @@ def main() -> None:
             selected.append((sc, c, st, du, w, h))
             used.setdefault(c.name, []).append((st, st + du))
             total += du
-        selected.sort(key=lambda x: x[0], reverse=True)  # best moment first
+        # Best moment first — but keep the featured shot leading if set.
+        rest = sorted([s for s in selected if s is not featured], key=lambda x: x[0], reverse=True)
+        selected = ([featured] if featured else []) + rest
         print(f"\nSelected {len(selected)} highlight(s) (~{total:.0f}s) from {len(used)} clip(s):")
         for sc, c, st, du, _, _ in selected:
             print(f"  - {c.name} @ {st:.1f}-{st + du:.1f}s  (flight {sc:.1f}/10)")
