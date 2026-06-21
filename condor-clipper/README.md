@@ -16,8 +16,8 @@ Raw videos in → finished, graded, follow-the-bird reel out (~2-3 min, no click
 
 ```bash
 ./reel.sh /path/to/folder_of_videos
-# punchier look / stronger spotlight:
-./reel.sh ~/Downloads/new_condors --pop 1.4 --spotlight 0.8
+# mix in still photos (Ken Burns pan/zoom), punchier look:
+./reel.sh ~/Downloads/trip --photos ~/Downloads/trip_photos --pop 1.4
 ```
 
 It runs the two steps below (clip → reel) and opens `output/reel.mp4` when done.

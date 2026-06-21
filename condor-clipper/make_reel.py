@@ -29,6 +29,7 @@ from pathlib import Path
 import anthropic
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".heic"}
 DEFAULT_MODEL = "claude-opus-4-8"
 
 BBOX_SCHEMA = {
@@ -211,6 +212,47 @@ def best_window(centers, clip_dur: float, win_len: float) -> tuple[float, float]
     return (best_start, win_len) if best_motion > 1e-6 else middle
 
 
+def grade_filters(pop: float, spotlight: float) -> list[str]:
+    """The shared bright/vibrant 'pop' grade (+ optional vignette), for video and photos."""
+    f = []
+    if pop > 0:
+        f.append(f"eq=contrast={1 + 0.10 * pop:.3f}:brightness={0.06 * pop:.3f}:"
+                 f"saturation={1 + 0.30 * pop:.3f}:gamma={1 + 0.06 * pop:.3f}")
+        f.append(f"unsharp=5:5:{0.8 * pop:.3f}:5:5:0.0")
+    if spotlight > 0:
+        f.append(f"vignette=angle={0.6 + 0.6 * spotlight:.3f}")
+    return f
+
+
+def build_kenburns_clip(image: Path, out: Path, dur: float, cw: int, ch: int,
+                        pop: float, spotlight: float, idx: int) -> bool:
+    """Turn a still photo into a moving clip: slow Ken Burns zoom (alternating in/out),
+    filling the canvas, with the same grade as the video clips."""
+    frames = max(2, int(round(dur * 30)))
+    big_w, big_h = cw * 2, ch * 2  # oversample so the zoom stays smooth
+    if idx % 2 == 0:
+        z = "min(zoom+0.0012,1.15)"           # slow zoom in
+    else:
+        z = "if(lte(on,1),1.15,max(zoom-0.0012,1.0))"  # start tight, ease out
+    filters = [
+        f"scale={big_w}:{big_h}:force_original_aspect_ratio=increase",
+        f"crop={big_w}:{big_h}",
+        f"zoompan=z='{z}':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        f"s={cw}x{ch}:fps=30",
+    ]
+    filters += grade_filters(pop, spotlight)
+    filters += ["setsar=1", "format=yuv420p"]
+    vf = ",".join(filters)
+    cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+              "-loop", "1", "-i", str(image), "-vf", vf, "-t", f"{dur:.3f}",
+              "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+              "-pix_fmt", "yuv420p", "-color_range", "tv", "-movflags", "+faststart", str(out)])
+    if cp.returncode != 0:
+        print(f"  ! Ken Burns failed for {image.name}: {cp.stderr.strip()[:200]}", file=sys.stderr)
+        return False
+    return True
+
+
 def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
                     cw_out: int, ch_out: int, out: Path, pop: float = 1.0,
                     spotlight: float = 0.6, start: float = 0.0,
@@ -240,12 +282,7 @@ def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
 
     filters = [f"crop={win_w}:{win_h}:x={xexpr}:y={yexpr}",
                f"scale={cw_out}:{ch_out}:flags=lanczos", "setsar=1"]
-    if pop > 0:  # bright + vibrant "pop": lift brightness/midtones, richer color, sharpen
-        filters.append(f"eq=contrast={1 + 0.10 * pop:.3f}:brightness={0.06 * pop:.3f}:"
-                       f"saturation={1 + 0.30 * pop:.3f}:gamma={1 + 0.06 * pop:.3f}")
-        filters.append(f"unsharp=5:5:{0.8 * pop:.3f}:5:5:0.0")
-    if spotlight > 0:  # centered vignette = spotlight that follows the (centered) bird
-        filters.append(f"vignette=angle={0.6 + 0.6 * spotlight:.3f}")
+    filters += grade_filters(pop, spotlight)
     filters += ["fps=30", "format=yuv420p"]
     vf = ",".join(filters)
     trim = ["-ss", f"{start:.3f}", "-t", f"{dur:.3f}"] if dur else []
@@ -316,6 +353,17 @@ def order_by_manifest(clips: list[Path], manifest: Path) -> list[Path]:
     return sorted(clips, key=lambda c: rank.get(c.name, 0), reverse=True)
 
 
+def interleave(vids: list, photos: list) -> list:
+    """Mix photos in among the video highlights so they're spread through the reel."""
+    out, i, j = [], 0, 0
+    while i < len(vids) or j < len(photos):
+        if i < len(vids):
+            out.append(vids[i]); i += 1
+        if j < len(photos):
+            out.append(photos[j]); j += 1
+    return out
+
+
 def scores_from_detections(clip_name: str, manifest: Path, out_dir: Path, clip_dur: float):
     """Reuse the clipper's per-frame 'interesting' scores (no API). Maps the clip back to
     its source via the manifest and reads detections_<source>.csv. Non-condor frames -> 0."""
@@ -370,6 +418,10 @@ def main() -> None:
                     help="Only consider this many source clips, best-first (0 = all).")
     ap.add_argument("--per-clip-max", type=int, default=2,
                     help="Max highlights taken from any one clip, for variety (default: 2).")
+    ap.add_argument("--photos", type=Path,
+                    help="A photo file or folder of photos to mix in (Ken Burns motion).")
+    ap.add_argument("--photo-len", type=float, default=2.5,
+                    help="Seconds per still photo (default: 2.5).")
     ap.add_argument("--rescore", action="store_true",
                     help="Force re-scoring moments (ignore cached scores in output/_cache).")
     args = ap.parse_args()
@@ -466,12 +518,26 @@ def main() -> None:
             if build_zoom_clip(c, [(0.0, 0.5, 0.5)], w, h, args.zoom, cw_out, ch_out, outn,
                                args.pop, args.spotlight, st, du):
                 normalized.append(outn)
-        if not normalized:
-            sys.exit("No clips processed.")
+
+        # Still photos -> Ken Burns clips, mixed in among the video highlights.
+        photo_clips = []
+        if args.photos:
+            photos = ([args.photos] if args.photos.is_file()
+                      else sorted(p for p in args.photos.iterdir() if p.suffix.lower() in IMAGE_EXTS))
+            for i, ph in enumerate(photos):
+                outp = norm_tmp / f"kb_{i:02d}.mp4"
+                if build_kenburns_clip(ph, outp, args.photo_len, cw_out, ch_out,
+                                       args.pop, args.spotlight, i):
+                    photo_clips.append(outp)
+            print(f"Added {len(photo_clips)} photo(s) with Ken Burns motion.")
+
+        sequence = interleave(normalized, photo_clips)
+        if not sequence:
+            sys.exit("Nothing to build (no usable clips or photos).")
 
         print(f"\nStitching reel ({args.canvas}, zoom {args.zoom}, transition {args.transition}s"
               f"{', music' if args.music else ''}) ...")
-        if not build_reel(normalized, args.out, args.transition, args.music):
+        if not build_reel(sequence, args.out, args.transition, args.music):
             sys.exit("Reel build failed.")
     finally:
         shutil.rmtree(frames_tmp, ignore_errors=True)
