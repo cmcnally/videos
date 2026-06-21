@@ -230,11 +230,11 @@ def grade_filters(pop: float, spotlight: float) -> list[str]:
     """The shared bright/vibrant 'pop' grade (+ optional vignette), for video and photos."""
     f = []
     if pop > 0:
-        # gentle, natural grade — mild contrast/saturation lift, light vibrance (not "fake")
-        f.append(f"eq=contrast={1 + 0.07 * pop:.3f}:brightness={0.03 * pop:.3f}:"
-                 f"saturation={1 + 0.18 * pop:.3f}:gamma={1 + 0.03 * pop:.3f}")
-        f.append(f"vibrance=intensity={min(1.0, 0.12 * pop):.3f}")
-        f.append(f"unsharp=5:5:{0.5 * pop:.3f}:5:5:0.0")
+        # vibrant but natural — a tasteful middle (more pop than flat, less than "fake")
+        f.append(f"eq=contrast={1 + 0.10 * pop:.3f}:brightness={0.035 * pop:.3f}:"
+                 f"saturation={1 + 0.28 * pop:.3f}:gamma={1 + 0.04 * pop:.3f}")
+        f.append(f"vibrance=intensity={min(1.0, 0.20 * pop):.3f}")
+        f.append(f"unsharp=5:5:{0.6 * pop:.3f}:5:5:0.0")
     if spotlight > 0:
         f.append(f"vignette=angle={0.6 + 0.6 * spotlight:.3f}")
     return f
