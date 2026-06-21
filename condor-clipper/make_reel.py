@@ -319,8 +319,7 @@ def build_reel(normalized: list[Path], out: Path, transition: float, music: Path
 
     fdur = fade if fade > 0 else 0.5
     fo_st = max(0.0, total - fdur)
-    fc.append(f"{cur}fade=t=in:st=0:d={fdur:.2f},fade=t=out:st={fo_st:.3f}:d={fdur:.2f},"
-              f"format=yuv420p[vout]")
+    fc.append(f"{cur}fade=t=out:st={fo_st:.3f}:d={fdur:.2f},format=yuv420p[vout]")
 
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs]
     maps = ["-map", "[vout]"]
