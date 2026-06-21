@@ -20,11 +20,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VIDEOS="" PHOTOS="" TITLE="" SUBTITLE="" COVER="" MUSIC="" OUT="output/trip_reel.mp4" OPENER="" MAXPHOTOS="40"
+VIDEOS="" PHOTOS="" ALBUM="" TITLE="" SUBTITLE="" COVER="" MUSIC="" OUT="output/trip_reel.mp4" OPENER="" MAXPHOTOS="40"
 while [ $# -gt 0 ]; do
   case "$1" in
     --videos) VIDEOS="$2"; shift 2;;
     --photos) PHOTOS="$2"; shift 2;;
+    --album) ALBUM="$2"; shift 2;;
     --title) TITLE="$2"; shift 2;;
     --subtitle) SUBTITLE="$2"; shift 2;;
     --cover) COVER="$2"; shift 2;;
@@ -35,8 +36,14 @@ while [ $# -gt 0 ]; do
     *) echo "unknown arg: $1"; exit 1;;
   esac
 done
-: "${VIDEOS:?--videos required}" "${PHOTOS:?--photos required}" "${TITLE:?--title required}"
-: "${COVER:?--cover required}" "${MUSIC:?--music required}"
+# Pull photos straight from a Photos.app album if --album given (no manual export).
+if [ -n "$ALBUM" ]; then
+  PHOTOS="output/_album_photos"
+  ./pull_album.sh "$ALBUM" "$PHOTOS"
+fi
+
+: "${VIDEOS:?--videos required}" "${TITLE:?--title required}"
+: "${PHOTOS:?--photos or --album required}" "${COVER:?--cover required}" "${MUSIC:?--music required}"
 
 source .venv/bin/activate
 
