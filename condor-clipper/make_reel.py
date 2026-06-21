@@ -390,6 +390,47 @@ def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, c
     return True
 
 
+def build_title_cover(cover_img: Path, title: str, subtitle: str, out: Path, dur: float,
+                      cw: int, ch: int, pop: float, spotlight: float, tmp: Path) -> bool:
+    """A title cover slide: title + subtitle over a hero photo (gentle zoom, bottom scrim).
+    Renders the text with rsvg-convert (brew install librsvg)."""
+    if not shutil.which("rsvg-convert"):
+        print("  ! rsvg-convert not found (brew install librsvg) — skipping title cover.", file=sys.stderr)
+        return False
+    big = max(48, int(cw * 0.078))
+    small = max(24, int(cw * 0.041))
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="{cw}" height="{ch}" viewBox="0 0 {cw} {ch}">
+  <defs><linearGradient id="s" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#000" stop-opacity="0.10"/><stop offset="0.55" stop-color="#000" stop-opacity="0.05"/>
+    <stop offset="1" stop-color="#000" stop-opacity="0.72"/></linearGradient></defs>
+  <rect width="{cw}" height="{ch}" fill="url(#s)"/>
+  <g font-family="Helvetica Neue, Helvetica, Arial, sans-serif" fill="#fff" text-anchor="middle">
+    <text x="{cw // 2}" y="{int(ch * 0.797)}" font-size="{big}" font-weight="700" letter-spacing="3"
+      style="paint-order:stroke" stroke="#000" stroke-opacity="0.25" stroke-width="2">{title}</text>
+    <line x1="{cw * 0.40:.0f}" y1="{int(ch * 0.821)}" x2="{cw * 0.60:.0f}" y2="{int(ch * 0.821)}"
+      stroke="#fff" stroke-opacity="0.8" stroke-width="3"/>
+    <text x="{cw // 2}" y="{int(ch * 0.854)}" font-size="{small}" letter-spacing="10" fill-opacity="0.92">{subtitle}</text>
+  </g></svg>'''
+    svgp, pngp = tmp / "title.svg", tmp / "title.png"
+    svgp.write_text(svg)
+    if run(["rsvg-convert", "-w", str(cw), "-h", str(ch), str(svgp), "-o", str(pngp)]).returncode != 0:
+        return False
+    grade = ",".join(grade_filters(pop, spotlight))
+    frames = max(2, int(round(dur * 30)))
+    cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-i", str(cover_img),
+              "-i", str(pngp), "-filter_complex",
+              f"[0]scale={cw}:{ch}:force_original_aspect_ratio=increase,crop={cw}:{ch},"
+              f"zoompan=z='min(zoom+0.0008,1.06)':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+              f"s={cw}x{ch}:fps=30,setsar=1{',' + grade if grade else ''}[bg];[bg][1]overlay=0:0,"
+              f"format=yuv420p[v]", "-map", "[v]", "-t", f"{dur:.3f}", "-an", "-c:v", "libx264",
+              "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-color_range", "tv",
+              "-movflags", "+faststart", str(out)])
+    if cp.returncode != 0:
+        print(f"  ! title cover failed: {cp.stderr.strip()[:200]}", file=sys.stderr)
+        return False
+    return True
+
+
 def build_zoom_clip(video: Path, centers, src_w: int, src_h: int, zoom: float,
                     cw_out: int, ch_out: int, out: Path, pop: float = 1.0,
                     spotlight: float = 0.6, start: float = 0.0,
@@ -628,7 +669,7 @@ def main() -> None:
     ap.add_argument("--step", type=float, default=1.0, help="Seconds between tracking samples (default: 1).")
     ap.add_argument("--canvas", default="1080x1920", help="Output WxH (default: 1080x1920, vertical 9:16).")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"Claude model (default: {DEFAULT_MODEL}).")
-    ap.add_argument("--transition", type=float, default=0.7,
+    ap.add_argument("--transition", type=float, default=0.35,
                     help="Cross-fade seconds between clips, and fade in/out (0 = hard cuts). Default 0.7.")
     ap.add_argument("--music", type=Path, help="Audio file to lay under the reel (looped, faded).")
     ap.add_argument("--pop", type=float, default=1.0,
@@ -641,27 +682,35 @@ def main() -> None:
                     help="Target total seconds of highlights before transitions (default: 21 -> ~17s reel).")
     ap.add_argument("--max-clips", type=int, default=0,
                     help="Only consider this many source clips, best-first (0 = all).")
-    ap.add_argument("--per-clip-max", type=int, default=2,
+    ap.add_argument("--per-clip-max", type=int, default=1,
                     help="Max highlights taken from any one clip, for variety (default: 2).")
     ap.add_argument("--intro", type=Path,
                     help="A pre-rendered intro clip prepended as the very first segment "
                          "(e.g. a map zoom). Should match the canvas size/fps.")
+    ap.add_argument("--title", type=str,
+                    help="Opening cover-slide title (e.g. 'SOUTHERN PATAGONIA').")
+    ap.add_argument("--subtitle", type=str, default="",
+                    help="Cover subtitle under the title (e.g. 'NOVEMBER 2025').")
+    ap.add_argument("--cover", type=Path,
+                    help="Hero photo for the title cover background.")
+    ap.add_argument("--title-len", type=float, default=2.8,
+                    help="Title cover duration, seconds (default 2.8).")
     ap.add_argument("--feature", type=str,
                     help="Lead the reel with the clip whose name contains this text (the hero shot).")
-    ap.add_argument("--feature-len", type=float, default=5.0,
+    ap.add_argument("--feature-len", type=float, default=1.2,
                     help="Seconds of screen time for the featured clip (default: 5).")
     ap.add_argument("--feature-at", type=float, default=None,
                     help="Start the featured window at this second (e.g. 0 for a fly-in). "
                          "Default: auto-pick the highest-scoring window.")
     ap.add_argument("--photos", type=Path,
                     help="A photo file or folder of photos to mix in (Ken Burns motion).")
-    ap.add_argument("--photo-len", type=float, default=2.5,
+    ap.add_argument("--photo-len", type=float, default=1.6,
                     help="Seconds per still photo (default: 2.5).")
     ap.add_argument("--max-photos", type=int, default=0,
                     help="Score photos and keep only the best N (0 = use all, no scoring).")
     ap.add_argument("--seed", type=int, default=7,
                     help="Random seed for layout/size variety (change it to reshuffle the look).")
-    ap.add_argument("--gutter", type=int, default=12,
+    ap.add_argument("--gutter", type=int, default=14,
                     help="Border/gutter px between photos in grid collages (0 = none). Default 12.")
     ap.add_argument("--gutter-color", type=str, default="white",
                     help="Color of the grid border/gutter (default: white).")
@@ -946,6 +995,12 @@ def main() -> None:
             sequence = interleave([p for _, p in video_items], [p for _, p in photo_items])
         if args.intro and args.intro.exists():  # prepend the intro (e.g. map zoom) first
             sequence = [args.intro] + sequence
+        if args.title and args.cover and args.cover.exists():  # title cover slide, very first
+            cov = norm_tmp / "cover.mp4"
+            if build_title_cover(args.cover, args.title, args.subtitle, cov, args.title_len,
+                                 cw_out, ch_out, args.pop, args.spotlight, frames_tmp):
+                sequence = [cov] + sequence
+                print(f"Cover: '{args.title}' over {args.cover.name}")
         if not sequence:
             sys.exit("Nothing to build (no usable clips or photos).")
         nseg = len(sequence)

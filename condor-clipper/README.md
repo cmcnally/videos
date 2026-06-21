@@ -104,3 +104,33 @@ estimate before a big run: do a `--dry-run --max-frames 50` pass first, or drop
 to `--model claude-haiku-4-5`. A cheap pre-filter (a local YOLO "is there a
 bird" pass) could cut the frame count before Claude ever sees them — not built
 in yet, but the natural next optimization if your library gets large.
+
+## Trip reels — house style (reusable workflow)
+
+The locked-in look for trip recaps (Catharine's preset), now the defaults:
+
+- **Vertical 9:16, ~50s**, breathing pace (`--photo-len 1.6`, `--transition 0.35`)
+- **Title cover slide** first (`--title`/`--subtitle` over a `--cover` hero photo) — also the thumbnail, so no black preview
+- **Chronological, a bit of every day** (`--coverage`); photos limited to the trip window
+- **Best moments only**: video scored, weak clips dropped (`--min-score 7`); photos scored & best-per-day kept (`--max-photos`)
+- **Varied magazine collages** (1/2/3/4-up, orientation-matched so they fill cleanly) with **white frames** (`--gutter 14`), each **sliding/fading in**
+- **Varied transitions** (slides/wipes/splits/dissolves), reshuffle with `--seed`
+- **Tasteful vibrance** (natural, not oversaturated)
+- **Upbeat music**, beat-paced cuts. Pick a track by mood/BPM; analyze a file's tempo with librosa if unsure (Catharine is deaf — verify audio technically, never by ear)
+
+### One command per trip
+
+```bash
+./trip-reel.sh --videos ~/trip/videos --photos ~/trip/photos \
+  --title "SOUTHERN PATAGONIA" --subtitle "NOVEMBER 2025" \
+  --cover ~/trip/photos/fitzroy.JPG --music music/track.mp3 \
+  --opener arrival_clip.mov            # optional: feature an arrival shot after the cover
+```
+
+Tips:
+- **Curated photos** (e.g. from a Blurb book): export the placed photos with capture dates in the
+  filename (`YYYY-MM-DDTHH-MM-SS_*.jpg`) so chronological order + the trip-window filter work.
+- **Screenshots sneak in** (video stills with a playhead/timestamp): spot them by odd pixel size
+  (`ffprobe`), and crop the UI off before using.
+- Re-edits are instant & free once scored (cached in `output/_cache`); change `--seed`, `--photo-len`,
+  `--title`, `--music`, etc. without re-scoring.
