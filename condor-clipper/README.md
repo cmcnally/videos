@@ -134,3 +134,25 @@ Tips:
   (`ffprobe`), and crop the UI off before using.
 - Re-edits are instant & free once scored (cached in `output/_cache`); change `--seed`, `--photo-len`,
   `--title`, `--music`, etc. without re-scoring.
+
+## Share it / set up on a new Mac (a friend's, or yours)
+
+It's a small command-line tool — a few setup steps, then one command per reel.
+
+```bash
+git clone https://github.com/cmcnally/videos.git
+cd videos/condor-clipper
+./setup.sh                      # installs ffmpeg + librsvg + Python libs, scaffolds .env
+# then paste YOUR OWN Anthropic API key into .env  (open -e .env)
+./trip-reel.sh --album "My Trip" --videos ~/trip/videos \
+   --title "MY TRIP" --subtitle "MONTH 2026" --cover ~/trip/cover.jpg --music music/track.mp3
+```
+
+What each person needs:
+- **macOS** (the `--album` Photos pull and screenshots are Apple-specific; the rest is portable)
+- **Homebrew** (https://brew.sh) for `ffmpeg` + `librsvg`
+- **Their own Anthropic API key + a few dollars of credit** — get it at console.anthropic.com.
+  Never share a key; it bills the owner. (`.env` is gitignored, so keys never end up in the repo.)
+- A music track they downloaded (royalty-free, e.g. Pixabay/Uppbeat)
+
+Cost: scoring a trip's footage/photos runs on the cheap `claude-haiku-4-5` model — usually a dollar or two per trip.
