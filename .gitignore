@@ -18,6 +18,17 @@
 *.jpg
 *.jpeg
 *.png
+*.heic
+*.aae
+*.mp3
+*.m4a
+
+# Local working folders (personal footage/photos/music — never commit)
+**/input/
+**/book_photos/
+**/maps/
+**/music/
+**/_album_photos/
 
 # Secrets
 .env
