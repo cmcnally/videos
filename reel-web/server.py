@@ -30,7 +30,7 @@ import make_reel as mr  # building blocks: build_title_cover / build_kenburns_cl
 OUTPUT = HERE / "output"; OUTPUT.mkdir(exist_ok=True)
 MUSIC = HERE / "music"
 
-CW, CH = 1080, 1920
+CW, CH = 720, 1280   # 9:16 vertical; 720p fits the 512MB Starter instance (1080 OOMs there)
 PHOTO_LEN, TITLE_LEN, TRANSITION = 1.6, 2.8, 0.35
 MIN_LEN, MAX_LEN = 1.1, 2.2          # clamp per-clip on-screen time when fitting a target
 
@@ -45,7 +45,7 @@ THEME_LOOK = {
 }
 
 jobs: dict[str, dict] = {}   # job_id -> {state, done, total, url, error}
-MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "2"))   # renders at once; the rest queue
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))   # renders at once (1 = safe on small instances); the rest queue
 OUTPUT_TTL_MIN = int(os.environ.get("OUTPUT_TTL_MIN", "180")) # delete finished reels after this
 render_sem = threading.BoundedSemaphore(MAX_CONCURRENT)
 
