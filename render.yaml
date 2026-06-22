@@ -1,0 +1,11 @@
+# Render.com blueprint. In Render: New → Blueprint → pick this repo.
+# (Or New → Web Service → Docker, and set the Dockerfile path + context below by hand.)
+services:
+  - type: web
+    name: trip-reel
+    runtime: docker
+    dockerfilePath: reel-web/Dockerfile
+    dockerContext: .
+    plan: starter            # ~$7/mo; ffmpeg renders need a real (non-free) instance
+    healthCheckPath: /
+    autoDeploy: true

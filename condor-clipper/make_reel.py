@@ -241,7 +241,7 @@ def grade_filters(pop: float, spotlight: float) -> list[str]:
 
 
 def build_kenburns_clip(image: Path, out: Path, dur: float, cw: int, ch: int,
-                        pop: float, spotlight: float, idx: int) -> bool:
+                        pop: float, spotlight: float, idx: int, look: str = "") -> bool:
     """Turn a still photo into a moving clip: slow Ken Burns zoom (alternating in/out),
     filling the canvas, with the same grade as the video clips."""
     frames = max(2, int(round(dur * 30)))
@@ -257,6 +257,8 @@ def build_kenburns_clip(image: Path, out: Path, dur: float, cw: int, ch: int,
         f"s={cw}x{ch}:fps=30",
     ]
     filters += grade_filters(pop, spotlight)
+    if look:
+        filters.append(look)
     filters += ["setsar=1", "format=yuv420p"]
     vf = ",".join(filters)
     cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -342,7 +344,7 @@ def fit_layout_and_order(group: list, cw: int, ch: int, rng):
 
 def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, ch: int,
                     pop: float, spotlight: float, gutter: int = 12, border: str = "white",
-                    fit: str = "contain") -> bool:
+                    fit: str = "contain", look: str = "") -> bool:
     """Place photos into arbitrary cell rectangles (magazine-style). Each gets a `gutter`-px
     `border` frame and slides + fades in, staggered, for energetic motion.
     fit="contain" shows the whole photo (matted, never cut off); "cover" fills/crops the cell."""
@@ -378,6 +380,8 @@ def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, c
                   f"y='{cy}+({dy})*(1-{prog})'[o{i}]")
         cur = f"[o{i}]"
     grade = ",".join(grade_filters(pop, spotlight))
+    if look:
+        grade = grade + "," + look if grade else look
     fc.append(f"{cur}{grade + ',' if grade else ''}format=yuv420p[v]")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs,
            "-filter_complex", ";".join(fc), "-map", "[v]", "-t", f"{dur:.3f}", "-an",
@@ -391,7 +395,7 @@ def build_grid_clip(images: list, cells: list, out: Path, dur: float, cw: int, c
 
 
 def build_title_cover(cover_img: Path, title: str, subtitle: str, out: Path, dur: float,
-                      cw: int, ch: int, pop: float, spotlight: float, tmp: Path) -> bool:
+                      cw: int, ch: int, pop: float, spotlight: float, tmp: Path, look: str = "") -> bool:
     """A title cover slide: title + subtitle over a hero photo (gentle zoom, bottom scrim).
     Renders the text with rsvg-convert (brew install librsvg)."""
     if not shutil.which("rsvg-convert"):
@@ -416,6 +420,8 @@ def build_title_cover(cover_img: Path, title: str, subtitle: str, out: Path, dur
     if run(["rsvg-convert", "-w", str(cw), "-h", str(ch), str(svgp), "-o", str(pngp)]).returncode != 0:
         return False
     grade = ",".join(grade_filters(pop, spotlight))
+    if look:
+        grade = grade + "," + look if grade else look
     frames = max(2, int(round(dur * 30)))
     cp = run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-loop", "1", "-i", str(cover_img),
               "-i", str(pngp), "-filter_complex",

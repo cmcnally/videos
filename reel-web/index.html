@@ -1,0 +1,454 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Trip Reel — make a reel from your photos</title>
+<style>
+  :root {
+    --bg: #faf8f4; --card: #fff; --ink: #1d1b18; --muted: #6b655c;
+    --line: #e7e2d8; --accent: #c8623a; --radius: 16px;
+    /* theme-driven (set by JS) */
+    --t-bg: #f4f1ea; --t-fg: #ffffff; --t-accent: #c8623a;
+    --t-font: Georgia, 'Times New Roman', serif; --t-filter: saturate(1.18) contrast(1.04);
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font: 16px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+         color: var(--ink); background: var(--bg); }
+  header { padding: 22px 18px 8px; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 4px 0 0; font-size: 14px; }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px 120px; }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 16px; margin: 14px 0; }
+  .step h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+             margin: 0 0 12px; font-weight: 700; }
+  .pick { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 26px 16px;
+          border: 2px dashed var(--line); border-radius: 14px; text-align: center; cursor: pointer;
+          transition: border-color .15s, background .15s; }
+  .pick:hover { border-color: var(--accent); background: #fff8f4; }
+  .pick svg { width: 40px; height: 40px; color: var(--accent); }
+  .pick b { font-size: 17px; }
+  .pick small { color: var(--muted); }
+  input[type=file] { display: none; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chip { border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 7px 13px;
+          font-size: 13px; cursor: pointer; }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+  .chip.sel { border-color: var(--accent); color: var(--accent); background: #fff8f4; font-weight: 600; }
+  .advice { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  .pbar { height: 10px; background: var(--line); border-radius: 6px; overflow: hidden; margin: 6px 0; }
+  .pbar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+  .thumb { position: relative; aspect-ratio: 3/4; border-radius: 10px; overflow: hidden; background: #eee;
+           cursor: grab; border: 2px solid transparent; }
+  .thumb.drag { opacity: .4; } .thumb.over { border-color: var(--accent); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; filter: var(--t-filter); }
+  .thumb .n { position: absolute; top: 5px; left: 5px; z-index: 2; background: rgba(0,0,0,.6); color: #fff;
+              font-size: 11px; font-weight: 700; min-width: 18px; height: 18px; border-radius: 9px;
+              display: grid; place-items: center; padding: 0 5px; }
+  .thumb .x { position: absolute; top: 4px; right: 4px; z-index: 2; width: 20px; height: 20px; border: none;
+              border-radius: 50%; background: rgba(0,0,0,.55); color: #fff; cursor: pointer; font-size: 13px; }
+  label.f { display: block; font-size: 13px; color: var(--muted); margin: 0 0 4px; }
+  input[type=text] { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px;
+                     font-size: 16px; background: #fff; }
+  .row { display: flex; gap: 12px; } .row > * { flex: 1; }
+  .themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px,1fr)); gap: 8px; }
+  .theme { border: 2px solid var(--line); border-radius: 12px; padding: 10px; cursor: pointer; text-align: left; }
+  .theme.sel { border-color: var(--accent); }
+  .theme .sw { height: 30px; border-radius: 7px; margin-bottom: 7px; display: flex; align-items: center;
+               justify-content: center; font-size: 13px; }
+  .theme .nm { font-size: 13px; font-weight: 600; }
+  .preview { display: flex; gap: 16px; align-items: flex-start; }
+  .cover { width: 200px; aspect-ratio: 9/16; border-radius: 16px; overflow: hidden; position: relative;
+           background: #ddd; flex: none; box-shadow: 0 8px 24px rgba(0,0,0,.14); }
+  .cover img { width: 100%; height: 100%; object-fit: cover; filter: var(--t-filter); }
+  .cover .scrim { position: absolute; inset: 0; background: linear-gradient(transparent 45%, rgba(0,0,0,.66)); }
+  .cover .txt { position: absolute; left: 0; right: 0; bottom: 22px; text-align: center; color: var(--t-fg);
+                font-family: var(--t-font); padding: 0 14px; }
+  .cover .ttl { font-size: 23px; font-weight: 700; line-height: 1.1; letter-spacing: .01em;
+                text-shadow: 0 1px 6px rgba(0,0,0,.4); }
+  .cover .sb { font-size: 13px; letter-spacing: .14em; margin-top: 6px; text-transform: uppercase;
+               opacity: .92; }
+  .cover .empty { position:absolute; inset:0; display:grid; place-items:center; color:#999; font-size:13px; }
+  .pnote { color: var(--muted); font-size: 13px; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(255,255,255,.92);
+         backdrop-filter: blur(8px); border-top: 1px solid var(--line); padding: 12px 16px;
+         display: flex; gap: 12px; align-items: center; justify-content: space-between; }
+  .bar .count { font-size: 14px; color: var(--muted); }
+  .go { background: var(--accent); color: #fff; border: none; border-radius: 12px; padding: 13px 22px;
+        font-size: 16px; font-weight: 700; cursor: pointer; }
+  .go:disabled { background: #d8cfc4; cursor: default; }
+  .hide { display: none; }
+  .tracks { display: flex; flex-direction: column; gap: 8px; }
+  .track { display: flex; align-items: center; gap: 12px; border: 2px solid var(--line);
+           border-radius: 12px; padding: 10px 12px; cursor: pointer; }
+  .track.sel { border-color: var(--accent); background: #fff8f4; }
+  .track .play { width: 38px; height: 38px; border-radius: 50%; border: none; background: var(--accent);
+                 color: #fff; font-size: 14px; cursor: pointer; flex: none; }
+  .track .meta { flex: 1; min-width: 0; }
+  .track .tn { font-weight: 600; font-size: 14px; }
+  .track .tags { font-size: 12px; color: var(--muted); margin-top: 3px; display: flex; gap: 10px;
+                 flex-wrap: wrap; align-items: center; }
+  .track .bpm { font-weight: 700; color: var(--ink); }
+  .energy { display: flex; gap: 2px; align-items: flex-end; height: 16px; }
+  .energy i { width: 3px; background: var(--accent); border-radius: 1px; display: block; }
+  .rec { font-size: 11px; font-weight: 700; color: var(--accent); border: 1px solid var(--accent);
+         border-radius: 999px; padding: 2px 8px; }
+  .lic { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .beat { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+  .upload-btn { width: 100%; margin-top: 8px; border: 2px dashed var(--line); background: #fff;
+                border-radius: 12px; padding: 12px; font-size: 14px; color: var(--muted); cursor: pointer; }
+  .upload-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .track .bpmx { color: var(--muted); font-weight: 600; }
+  dialog { border: none; border-radius: 16px; padding: 22px; max-width: 340px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+  dialog h3 { margin: 0 0 8px; } dialog p { color: var(--muted); margin: 0 0 16px; }
+  dialog button { background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 10px 18px;
+                  font-weight: 600; cursor: pointer; }
+</style>
+
+<header>
+  <h1>Trip Reel</h1>
+  <p class="sub">Pick photos from your phone → get a reel. No app to install.</p>
+</header>
+
+<main>
+  <section class="step">
+    <h2>1 · Photos</h2>
+    <label class="pick" id="pickBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.6"/><path d="M21 16l-5-5L5 19"/></svg>
+      <b>Choose photos</b>
+      <small>Opens your phone's photo picker — multi-select, just like an app</small>
+      <input type="file" id="file" accept="image/*" multiple>
+    </label>
+
+    <div class="toolbar" style="margin-top:14px">
+      <button class="chip lenchip sel" data-t="auto">Auto length</button>
+      <button class="chip lenchip" data-t="15">15s</button>
+      <button class="chip lenchip" data-t="30">30s</button>
+      <button class="chip lenchip" data-t="45">45s</button>
+      <button class="chip lenchip" data-t="60">60s</button>
+    </div>
+    <p class="advice" id="lenAdvice">Auto length — fits your photos at a comfortable pace.</p>
+
+    <div id="editor" class="hide">
+      <div class="toolbar">
+        <button class="chip" id="byDate">📅 Sort by date taken</button>
+        <button class="chip" id="shuffle">🔀 Shuffle</button>
+        <button class="chip" id="addMore">＋ Add more</button>
+      </div>
+      <p class="pnote">Drag a photo to reorder. The number shows its place in the reel.</p>
+      <div class="grid" id="grid"></div>
+    </div>
+  </section>
+
+  <section class="step" id="textStep">
+    <h2>2 · Cover text</h2>
+    <div class="row">
+      <div><label class="f">Title</label><input type="text" id="title" value="SOUTHERN PATAGONIA" maxlength="40"></div>
+      <div><label class="f">Subtitle</label><input type="text" id="subtitle" value="NOVEMBER 2025" maxlength="40"></div>
+    </div>
+  </section>
+
+  <section class="step">
+    <h2>3 · Theme</h2>
+    <div class="themes" id="themes"></div>
+  </section>
+
+  <section class="step">
+    <h2>4 · Music</h2>
+    <p class="beat">♪ Cuts land on the beat — pick by mood, tempo (BPM), and energy. No need to listen.</p>
+    <div class="tracks" id="tracks"></div>
+    <button class="upload-btn" id="uploadBtn">＋ Upload your own soundtrack</button>
+    <input type="file" id="audioFile" accept="audio/*" class="hide">
+    <p class="lic">Built-in tracks are royalty-free (Pixabay) — free to use, no attribution.
+       Uploading your own? Make sure you have the rights to use it.</p>
+    <audio id="audio"></audio>
+  </section>
+
+  <section class="step">
+    <h2>Live cover preview</h2>
+    <div class="preview">
+      <div class="cover" id="cover">
+        <div class="empty" id="coverEmpty">Pick photos to see your cover</div>
+        <img id="coverImg" class="hide">
+        <div class="scrim"></div>
+        <div class="txt"><div class="ttl" id="cTtl"></div><div class="sb" id="cSb"></div></div>
+      </div>
+      <p class="pnote">This is your opening title card. The full reel adds your photos in order,
+        gentle pan/zoom, white-framed collages, transitions, and music — rendered for you, then yours to download.</p>
+    </div>
+  </section>
+</main>
+
+<div class="bar">
+  <span class="count" id="count">No photos yet</span>
+  <button class="go" id="go" disabled>Make my reel →</button>
+</div>
+
+<dialog id="done">
+  <h3>🎬 Your reel</h3>
+  <div id="prog" class="hide">
+    <div class="pbar"><i id="pfill"></i></div>
+    <p class="advice" id="pmsg">Starting…</p>
+  </div>
+  <div id="result"></div>
+  <button id="closeDone">Close</button>
+</dialog>
+
+<script>
+const THEMES = [
+  { id:'bright',  nm:'Bright & Vibrant', bg:'#f4f1ea', fg:'#fff', accent:'#c8623a',
+    font:"Georgia, serif", filter:'saturate(1.22) contrast(1.05) brightness(1.03)' },
+  { id:'film',    nm:'Warm Film',        bg:'#efe7da', fg:'#fff5e8', accent:'#a8762f',
+    font:"'Times New Roman', serif", filter:'saturate(1.05) sepia(.14) contrast(1.03)' },
+  { id:'clean',   nm:'Clean & Minimal',  bg:'#ffffff', fg:'#fff', accent:'#2b2b2b',
+    font:"'Helvetica Neue', Arial, sans-serif", filter:'saturate(1.0) contrast(1.02)' },
+  { id:'bold',    nm:'Bold & Modern',    bg:'#141414', fg:'#fff', accent:'#e0483d',
+    font:"'Arial Black', Impact, sans-serif", filter:'saturate(1.3) contrast(1.12)' },
+  { id:'cool',    nm:'Cool & Crisp',     bg:'#eef2f4', fg:'#fff', accent:'#2f6f8f',
+    font:"'Helvetica Neue', Arial, sans-serif", filter:'saturate(1.1) contrast(1.04) hue-rotate(-4deg)' },
+];
+let photos = [];            // {url, date, name}
+let theme = THEMES[0];
+
+const $ = s => document.querySelector(s);
+const grid = $('#grid');
+
+// ---- Target length + photo-count guidance ----
+let target = null; // null = Auto
+function singlesMax(T){ return Math.round((T - 2.8) / 1.25); }   // mirrors the server's pace math
+function lengthAdvice(){
+  const el = $('#lenAdvice'), n = photos.length;
+  if (target === null){
+    el.textContent = n ? `Auto — ${n} photo${n>1?'s':''} ≈ ${Math.round(2.8 + n*1.25)}s.`
+                       : 'Auto length — fits your photos at a comfortable pace.';
+    return;
+  }
+  const rec = singlesMax(target);
+  if (!n){ el.textContent = `~${rec} photos fit a ${target}s reel at a comfortable pace.`; return; }
+  if (n <= rec){
+    const L = Math.min(2.2, (target - 2.8)/n + 0.35);
+    const pace = L > 1.9 ? 'relaxed' : (L < 1.35 ? 'snappy' : 'comfortable');
+    el.textContent = `${n} photos → ~${target}s, ${pace} pace ✓`;
+  } else {
+    el.textContent = `${n} photos is more than ~${rec} for ${target}s — I'll group some into collages to keep the pace.`;
+  }
+}
+document.querySelectorAll('.lenchip').forEach(c => c.onclick = () => {
+  document.querySelectorAll('.lenchip').forEach(x => x.classList.remove('sel'));
+  c.classList.add('sel');
+  target = c.dataset.t === 'auto' ? null : parseInt(c.dataset.t, 10);
+  lengthAdvice();
+});
+lengthAdvice();
+
+// ---- Themes UI ----
+const themesEl = $('#themes');
+THEMES.forEach(t => {
+  const el = document.createElement('div');
+  el.className = 'theme' + (t.id===theme.id?' sel':'');
+  el.innerHTML = `<div class="sw" style="background:${t.bg};color:${t.accent};font-family:${t.font};border:1px solid #0001">Aa</div><div class="nm">${t.nm}</div>`;
+  el.onclick = () => { theme = t; document.querySelectorAll('.theme').forEach(x=>x.classList.remove('sel')); el.classList.add('sel'); applyTheme(); };
+  themesEl.appendChild(el);
+});
+function applyTheme(){
+  const r = document.documentElement.style;
+  r.setProperty('--t-bg', theme.bg); r.setProperty('--t-fg', theme.fg);
+  r.setProperty('--t-accent', theme.accent); r.setProperty('--t-font', theme.font);
+  r.setProperty('--t-filter', theme.filter);
+  document.documentElement.style.setProperty('--accent', theme.accent);
+  if (window.renderTracks) window.renderTracks();
+}
+applyTheme();
+
+// ---- Music picker (choose by mood / BPM / energy — built so you don't have to listen) ----
+let TRACKS = [];          // loaded from music/library.json (built by music_intake.py)
+let track = null;
+let userTracks = [];
+const audio = document.getElementById('audio');
+let playingId = null;
+
+function energyBars(e){
+  const heights=[.4,.7,1,.6,.9,.5,.8].map(h=>Math.round(4+h*e*12));
+  return heights.map(h=>`<i style="height:${h}px"></i>`).join('');
+}
+function allTracks(){ return TRACKS.concat(userTracks); }
+window.renderTracks = function(){
+  const wrap = document.getElementById('tracks');
+  wrap.innerHTML = '';
+  allTracks().forEach(t => {
+    const rec = !t.user && t.forThemes.includes(theme.id);
+    const bpm = t.bpm ? `<span class="bpm">${t.bpm} BPM</span>` : `<span class="bpmx">tempo auto-detected</span>`;
+    const el = document.createElement('div');
+    el.className = 'track' + (track && t.id===track.id?' sel':'');
+    el.innerHTML =
+      `<button class="play" data-id="${t.id}">${playingId===t.id?'❚❚':'▶'}</button>
+       <div class="meta">
+         <div class="tn">${t.nm}</div>
+         <div class="tags">${bpm}<span>${t.mood}</span>
+           <span class="energy" title="energy">${energyBars(t.energy)}</span>
+           ${rec?`<span class="rec">★ fits ${theme.nm.split(' ')[0]}</span>`:''}</div>
+       </div>`;
+    el.onclick = () => { track = t; renderTracks(); };
+    el.querySelector('.play').onclick = ev => { ev.stopPropagation(); toggle(t); };
+    wrap.appendChild(el);
+  });
+};
+function toggle(t){
+  if (playingId===t.id){ audio.pause(); playingId=null; }
+  else { audio.src = t.file; audio.play().catch(()=>{}); playingId = t.id; }
+  renderTracks();
+}
+audio.onended = () => { playingId = null; renderTracks(); };
+renderTracks();
+
+// Load the music library (built by music_intake.py). Add tracks + re-run intake = drop-in.
+fetch('music/library.json').then(r => r.ok ? r.json() : []).then(lib => {
+  if (Array.isArray(lib) && lib.length) { TRACKS = lib; track = TRACKS[0]; renderTracks(); }
+}).catch(() => {});
+
+// ---- Upload your own soundtrack ----
+const audioFile = document.getElementById('audioFile');
+document.getElementById('uploadBtn').onclick = () => audioFile.click();
+audioFile.addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const url = URL.createObjectURL(f);
+  let energy = 0.6; try { energy = await estimateEnergy(f); } catch(_) {}
+  const t = { id:'user', file:url, fileObj:f, nm:f.name.replace(/\.[^.]+$/,''), mood:'Your upload',
+              bpm:null, energy, forThemes:[], user:true };
+  userTracks = [t]; track = t; renderTracks();
+});
+// Rough loudness/energy so the visual energy bar works for uploads too (no listening needed).
+async function estimateEnergy(file){
+  const buf = await file.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const audioBuf = await ctx.decodeAudioData(buf);
+  const ch = audioBuf.getChannelData(0);
+  const step = Math.max(1, Math.floor(ch.length / 50000));
+  let sum = 0, count = 0;
+  for (let i = 0; i < ch.length; i += step) { sum += ch[i]*ch[i]; count++; }
+  ctx.close();
+  return Math.max(0.25, Math.min(1, Math.sqrt(sum/count) * 4));
+}
+
+// ---- Photo loading + client-side downscale ----
+$('#file').addEventListener('change', e => loadFiles(e.target.files));
+$('#addMore').onclick = () => $('#file').click();
+
+async function loadFiles(fileList){
+  const files = [...fileList];
+  for (const f of files){
+    const url = await downscale(f, 1600);
+    photos.push({ url, date: f.lastModified || 0, name: f.name });
+  }
+  $('#editor').classList.remove('hide');
+  render();
+}
+
+// Shrink in the browser so the eventual upload is small + fast.
+function downscale(file, max){
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width*s); c.height = Math.round(img.height*s);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      res(c.toDataURL('image/jpeg', 0.82));
+    };
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// ---- Reorder, sort, shuffle ----
+$('#byDate').onclick = () => { photos.sort((a,b)=>a.date-b.date); render(); };
+$('#shuffle').onclick = () => { for(let i=photos.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[photos[i],photos[j]]=[photos[j],photos[i]];} render(); };
+
+let dragFrom = null;
+function render(){
+  grid.innerHTML = '';
+  photos.forEach((p, i) => {
+    const d = document.createElement('div');
+    d.className = 'thumb'; d.draggable = true;
+    d.innerHTML = `<span class="n">${i+1}</span><img src="${p.url}"><button class="x" title="remove">×</button>`;
+    d.querySelector('.x').onclick = ev => { ev.stopPropagation(); photos.splice(i,1); render(); };
+    d.ondragstart = () => { dragFrom = i; d.classList.add('drag'); };
+    d.ondragend = () => d.classList.remove('drag');
+    d.ondragover = ev => { ev.preventDefault(); d.classList.add('over'); };
+    d.ondragleave = () => d.classList.remove('over');
+    d.ondrop = ev => { ev.preventDefault(); d.classList.remove('over');
+      const [m] = photos.splice(dragFrom,1); photos.splice(i,0,m); render(); };
+    grid.appendChild(d);
+  });
+  const n = photos.length;
+  $('#count').textContent = n ? `${n} photo${n>1?'s':''} · in order` : 'No photos yet';
+  $('#go').disabled = n === 0;
+  updateCover();
+  lengthAdvice();
+}
+
+// ---- Cover preview ----
+['title','subtitle'].forEach(id => $('#'+id).addEventListener('input', updateCover));
+function updateCover(){
+  $('#cTtl').textContent = $('#title').value;
+  $('#cSb').textContent = $('#subtitle').value;
+  const img = $('#coverImg');
+  if (photos.length){ img.src = photos[0].url; img.classList.remove('hide'); $('#coverEmpty').classList.add('hide'); }
+  else { img.classList.add('hide'); $('#coverEmpty').classList.remove('hide'); }
+}
+updateCover();
+
+// ---- Hand-off ----
+$('#go').onclick = async () => {
+  if (!photos.length) return;
+  const btn = $('#go'), orig = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Rendering…';
+  $('#result').innerHTML = '';
+  $('#prog').classList.remove('hide'); $('#pfill').style.width = '0%'; $('#pmsg').textContent = 'Uploading photos…';
+  $('#done').showModal();
+  try {
+    const fd = new FormData();
+    fd.append('title', $('#title').value);
+    fd.append('subtitle', $('#subtitle').value);
+    fd.append('theme', theme.id);
+    fd.append('target', target === null ? 'auto' : String(target));
+    if (track && track.user && track.fileObj) fd.append('music_file', track.fileObj);
+    else if (track) fd.append('music_track', track.id);
+    for (let i = 0; i < photos.length; i++) {
+      const blob = await (await fetch(photos[i].url)).blob();
+      fd.append('photos', blob, String(i).padStart(4,'0') + '.jpg');
+    }
+    const res = await fetch('/api/render', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (!res.ok || !data.job) throw new Error(data.error || 'Render failed to start');
+    const url = await pollProgress(data.job);
+    $('#prog').classList.add('hide');
+    $('#result').innerHTML =
+      `<video src="${url}" controls autoplay playsinline style="width:100%;border-radius:12px"></video>
+       <a href="${url}" download style="display:inline-block;margin-top:10px;color:var(--accent);font-weight:600">⬇ Download</a>`;
+  } catch (e) {
+    $('#prog').classList.add('hide');
+    $('#result').innerHTML = `<p style="color:#c0392b">Render failed: ${e.message}</p>`;
+  } finally {
+    btn.disabled = false; btn.textContent = orig;
+  }
+};
+function pollProgress(job){
+  return new Promise((resolve, reject) => {
+    const tick = async () => {
+      try {
+        const j = await (await fetch('/api/progress/' + job)).json();
+        if (j.error && j.state !== 'error') return reject(new Error(j.error));
+        const pct = j.total ? Math.round(100 * j.done / j.total) : 5;
+        $('#pfill').style.width = Math.max(5, pct) + '%';
+        $('#pmsg').textContent = j.state === 'rendering' ? `Rendering… ${pct}%`
+                               : j.state === 'queued' ? 'Starting…' : j.state;
+        if (j.state === 'done'){ $('#pfill').style.width = '100%'; return resolve(j.url); }
+        if (j.state === 'error') return reject(new Error(j.error || 'Render failed'));
+        setTimeout(tick, 700);
+      } catch (e) { reject(e); }
+    };
+    tick();
+  });
+}
+$('#closeDone').onclick = () => { $('#done').close(); $('#result').innerHTML = ''; };
+</script>

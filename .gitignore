@@ -30,6 +30,12 @@
 **/music/
 **/_album_photos/
 
+# Ship the curated royalty-free shelf with the web app (Pixabay license permits redistribution).
+# Must re-include the dir before the files, since **/music/ excludes it.
+!reel-web/music/
+!reel-web/music/*.mp3
+!reel-web/music/library.json
+
 # Secrets
 .env
 
