@@ -65,6 +65,11 @@ def load_env_file() -> None:
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
+    # Cap ffmpeg threads when FFMPEG_THREADS is set (web server on small RAM instances).
+    # x264 otherwise spawns ~1.5x threads-per-core and each holds frame buffers → OOM on 512MB.
+    n = os.environ.get("FFMPEG_THREADS")
+    if n and cmd and cmd[0] == "ffmpeg" and "-threads" not in cmd:
+        cmd = [cmd[0], "-threads", n] + cmd[1:]
     return subprocess.run(cmd, capture_output=True, text=True)
 
 
@@ -245,7 +250,7 @@ def build_kenburns_clip(image: Path, out: Path, dur: float, cw: int, ch: int,
     """Turn a still photo into a moving clip: slow Ken Burns zoom (alternating in/out),
     filling the canvas, with the same grade as the video clips."""
     frames = max(2, int(round(dur * 30)))
-    big_w, big_h = cw * 2, ch * 2  # oversample so the zoom stays smooth
+    big_w, big_h = even(cw * 3 // 2), even(ch * 3 // 2)  # 1.5x oversample for smooth zoom (memory-lean)
     if idx % 2 == 0:
         z = "min(zoom+0.0012,1.15)"           # slow zoom in
     else:
