@@ -16,8 +16,8 @@ COPY reel-web/ /app/reel-web/
 
 WORKDIR /app/reel-web
 ENV PORT=8000
-# cap x264 threads so renders stay within memory on small instances
-ENV FFMPEG_THREADS=1
+# cap x264 threads to bound memory (2 is a good balance on the 2GB instance)
+ENV FFMPEG_THREADS=2
 EXPOSE 8000
 # One worker (the job/progress state is in-process), threaded for concurrent polls.
 CMD ["sh", "-c", "gunicorn -w 1 -k gthread --threads 8 -b 0.0.0.0:${PORT:-8000} --timeout 120 server:app"]

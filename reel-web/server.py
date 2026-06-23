@@ -30,7 +30,7 @@ import make_reel as mr  # building blocks: build_title_cover / build_kenburns_cl
 OUTPUT = HERE / "output"; OUTPUT.mkdir(exist_ok=True)
 MUSIC = HERE / "music"
 
-CW, CH = 720, 1280   # 9:16 vertical; 720p fits the 512MB Starter instance (1080 OOMs there)
+CW, CH = 1080, 1920   # 9:16 vertical HD (fits comfortably on the 2GB instance)
 PHOTO_LEN, TITLE_LEN, TRANSITION = 1.6, 2.8, 0.35
 MIN_LEN, MAX_LEN = 1.1, 2.2          # clamp per-clip on-screen time when fitting a target
 
@@ -114,9 +114,11 @@ def render_job(job_id, work, imgs, title, subtitle, pop, look, target, music_pat
             if not normalized:
                 j.update(state="error", error="Could not build any clips."); return
             out_name = f"reel-{job_id}.mp4"
+            mr.LAST_ERROR = ""
             if not mr.build_reel(normalized, OUTPUT / out_name, TRANSITION, music_path, seed=7):
                 j.update(state="error", error="Final stitch failed: " + (mr.LAST_ERROR or "")[:300]); return
             j["done"] += 1
+            j["transitions"] = not bool(mr.LAST_ERROR)   # False = xfade failed, fell back to cuts
             j.update(state="done", url=f"/output/{out_name}")
         except Exception as e:
             j.update(state="error", error=str(e))
