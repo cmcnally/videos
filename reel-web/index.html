@@ -398,6 +398,29 @@ function updateCover(){
 updateCover();
 
 // ---- Hand-off ----
+function showResult(url){
+  $('#prog').classList.add('hide');
+  $('#result').innerHTML =
+    `<video src="${url}" controls autoplay playsinline style="width:100%;border-radius:12px"></video>
+     <a href="${url}" download style="display:inline-block;margin-top:10px;color:var(--accent);font-weight:600">⬇ Download</a>`;
+  if (!$('#done').open) $('#done').showModal();
+  localStorage.removeItem('reel_job');
+}
+function showRenderError(msg){
+  $('#prog').classList.add('hide');
+  $('#result').innerHTML = `<p style="color:#c0392b">Render failed: ${msg}</p>`;
+  if (!$('#done').open) $('#done').showModal();
+  localStorage.removeItem('reel_job');
+}
+async function trackJob(job){   // attach to a running render: show progress, then the result
+  $('#result').innerHTML = '';
+  $('#prog').classList.remove('hide'); $('#pfill').style.width = '0%';
+  $('#pmsg').textContent = 'Working… you can lock your phone — we’ll keep it';
+  if (!$('#done').open) $('#done').showModal();
+  try { showResult(await pollProgress(job)); }
+  catch (e) { showRenderError(e.message); }
+}
+
 $('#go').onclick = async () => {
   if (!photos.length) return;
   const btn = $('#go'), orig = btn.textContent;
@@ -420,14 +443,10 @@ $('#go').onclick = async () => {
     const res = await fetch('/api/render', { method: 'POST', body: fd });
     const data = await res.json();
     if (!res.ok || !data.job) throw new Error(data.error || 'Render failed to start');
-    const url = await pollProgress(data.job);
-    $('#prog').classList.add('hide');
-    $('#result').innerHTML =
-      `<video src="${url}" controls autoplay playsinline style="width:100%;border-radius:12px"></video>
-       <a href="${url}" download style="display:inline-block;margin-top:10px;color:var(--accent);font-weight:600">⬇ Download</a>`;
+    localStorage.setItem('reel_job', data.job);   // remember it across lock / reload
+    await trackJob(data.job);
   } catch (e) {
-    $('#prog').classList.add('hide');
-    $('#result').innerHTML = `<p style="color:#c0392b">Render failed: ${e.message}</p>`;
+    showRenderError(e.message);
   } finally {
     btn.disabled = false; btn.textContent = orig;
   }
@@ -457,4 +476,24 @@ function pollProgress(job){
   });
 }
 $('#closeDone').onclick = () => { $('#done').close(); $('#result').innerHTML = ''; };
+
+// If the phone locked / Safari reloaded mid-render, reconnect to the saved job on load.
+async function resumeRender(){
+  const job = localStorage.getItem('reel_job');
+  if (!job) return;
+  try {
+    const r = await fetch('/api/progress/' + job);
+    if (r.ok) {
+      const j = await r.json();
+      if (j.state === 'done' && j.url) return showResult(j.url);
+      if (j.state === 'error') return localStorage.removeItem('reel_job');
+      return trackJob(job);                         // still rendering — reattach to it
+    }
+  } catch (_) {}
+  // Server forgot the job (it restarted) — the finished file may still be on disk.
+  const url = '/output/reel-' + job + '.mp4';
+  try { if ((await fetch(url, { method: 'HEAD' })).ok) return showResult(url); } catch (_) {}
+  localStorage.removeItem('reel_job');
+}
+resumeRender();
 </script>
