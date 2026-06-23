@@ -115,7 +115,7 @@ def render_job(job_id, work, imgs, title, subtitle, pop, look, target, music_pat
                 j.update(state="error", error="Could not build any clips."); return
             out_name = f"reel-{job_id}.mp4"
             if not mr.build_reel(normalized, OUTPUT / out_name, TRANSITION, music_path, seed=7):
-                j.update(state="error", error="Final stitch failed."); return
+                j.update(state="error", error="Final stitch failed: " + (mr.LAST_ERROR or "")[:300]); return
             j["done"] += 1
             j.update(state="done", url=f"/output/{out_name}")
         except Exception as e:

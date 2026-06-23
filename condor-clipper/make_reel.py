@@ -490,9 +490,12 @@ TRANSITIONS = ["fade", "dissolve", "slideleft", "slideright", "slideup", "slided
                "smoothup", "smoothdown", "circleopen", "horzopen", "vertopen", "fadeblack"]
 
 
-def build_reel(normalized: list[Path], out: Path, transition: float, music: Path | None,
-               seed: int = 0) -> bool:
-    """Stitch clips with varied transitions (slides/wipes/splits/dissolves), fade in/out, music."""
+LAST_ERROR = ""
+
+
+def _stitch(normalized: list[Path], out: Path, transition: float, music: Path | None,
+            seed: int = 0) -> bool:
+    """One stitch attempt: xfade transitions if transition>0, else a plain concat."""
     durs = [probe_dims(p)[2] for p in normalized]
     n = len(normalized)
     fade = max(0.0, transition)
@@ -534,9 +537,23 @@ def build_reel(normalized: list[Path], out: Path, transition: float, music: Path
             "-pix_fmt", "yuv420p", "-color_range", "tv", "-movflags", "+faststart", str(out)]
     cp = run(cmd)
     if cp.returncode != 0:
-        print(f"stitch failed: {cp.stderr.strip()[:300]}", file=sys.stderr)
+        global LAST_ERROR
+        LAST_ERROR = cp.stderr.strip()[:500]
+        print(f"stitch failed: {LAST_ERROR}", file=sys.stderr)
         return False
     return True
+
+
+def build_reel(normalized: list[Path], out: Path, transition: float, music: Path | None,
+               seed: int = 0) -> bool:
+    """Stitch with varied transitions; if the container's ffmpeg rejects xfade,
+    fall back to a plain concat (clean cuts) so a reel still renders."""
+    if _stitch(normalized, out, transition, music, seed):
+        return True
+    if transition > 0 and len(normalized) > 1:
+        print("stitch: xfade failed — retrying with concat fallback (no transitions)", file=sys.stderr)
+        return _stitch(normalized, out, 0.0, music, seed)
+    return False
 
 
 def order_by_manifest(clips: list[Path], manifest: Path) -> list[Path]:
