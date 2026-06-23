@@ -434,18 +434,24 @@ $('#go').onclick = async () => {
 };
 function pollProgress(job){
   return new Promise((resolve, reject) => {
+    let misses = 0;
     const tick = async () => {
       try {
-        const j = await (await fetch('/api/progress/' + job)).json();
+        const r = await fetch('/api/progress/' + job);
+        if (!r.ok) { return (++misses > 25) ? reject(new Error('the server is busy — please try again in a moment')) : setTimeout(tick, 1500); }
+        let j;
+        try { j = await r.json(); }
+        catch { return (++misses > 25) ? reject(new Error('the render didn’t finish — please try again')) : setTimeout(tick, 1500); }
+        misses = 0;
         if (j.error && j.state !== 'error') return reject(new Error(j.error));
         const pct = j.total ? Math.round(100 * j.done / j.total) : 5;
         $('#pfill').style.width = Math.max(5, pct) + '%';
         $('#pmsg').textContent = j.state === 'rendering' ? `Rendering… ${pct}%`
-                               : j.state === 'queued' ? 'Starting…' : j.state;
+                               : j.state === 'queued' ? 'In line…' : j.state;
         if (j.state === 'done'){ $('#pfill').style.width = '100%'; return resolve(j.url); }
         if (j.state === 'error') return reject(new Error(j.error || 'Render failed'));
-        setTimeout(tick, 700);
-      } catch (e) { reject(e); }
+        setTimeout(tick, 800);
+      } catch (e) { return (++misses > 25) ? reject(e) : setTimeout(tick, 1500); }
     };
     tick();
   });

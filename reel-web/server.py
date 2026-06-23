@@ -45,6 +45,36 @@ THEME_LOOK = {
 }
 
 jobs: dict[str, dict] = {}   # job_id -> {state, done, total, url, error}
+
+
+def stitch_lowmem(clips, out, music):
+    """Memory-bounded final stitch. Concatenates the clips with the concat DEMUXER
+    (streamed — no per-input decode), re-encoding once to add the fade-out + music.
+    Clean cuts; memory is flat regardless of clip count. (xfade crossfades buffer
+    every input and blow past 2GB on big reels.) Returns an error string, or None on success."""
+    total = sum(mr.probe_dims(p)[2] for p in clips)
+    listf = out.parent / f".concat-{out.stem}.txt"
+    listf.write_text("".join(f"file '{Path(p).resolve()}'\n" for p in clips))
+    fdur = 0.5
+    fo = max(0.0, total - fdur)
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-f", "concat", "-safe", "0", "-i", str(listf)]
+    if music and Path(music).exists():
+        cmd += ["-stream_loop", "-1", "-i", str(music), "-filter_complex",
+                f"[0:v]fade=t=out:st={fo:.3f}:d={fdur:.2f},format=yuv420p[v];"
+                f"[1:a]afade=t=in:st=0:d=1.5,afade=t=out:st={fo:.3f}:d={fdur:.2f}[a]",
+                "-map", "[v]", "-map", "[a]", "-shortest", "-c:a", "aac"]
+    else:
+        cmd += ["-filter_complex", f"[0:v]fade=t=out:st={fo:.3f}:d={fdur:.2f},format=yuv420p[v]",
+                "-map", "[v]", "-an"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-color_range", "tv", "-movflags", "+faststart", str(out)]
+    cp = mr.run(cmd)
+    try:
+        listf.unlink()
+    except OSError:
+        pass
+    return None if cp.returncode == 0 else cp.stderr.strip()[:300]
 MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))   # renders at once (1 = safe on small instances); the rest queue
 OUTPUT_TTL_MIN = int(os.environ.get("OUTPUT_TTL_MIN", "180")) # delete finished reels after this
 render_sem = threading.BoundedSemaphore(MAX_CONCURRENT)
@@ -114,11 +144,10 @@ def render_job(job_id, work, imgs, title, subtitle, pop, look, target, music_pat
             if not normalized:
                 j.update(state="error", error="Could not build any clips."); return
             out_name = f"reel-{job_id}.mp4"
-            mr.LAST_ERROR = ""
-            if not mr.build_reel(normalized, OUTPUT / out_name, TRANSITION, music_path, seed=7):
-                j.update(state="error", error="Final stitch failed: " + (mr.LAST_ERROR or "")[:300]); return
+            err = stitch_lowmem(normalized, OUTPUT / out_name, music_path)
+            if err:
+                j.update(state="error", error="Final stitch failed: " + err); return
             j["done"] += 1
-            j["transitions"] = not bool(mr.LAST_ERROR)   # False = xfade failed, fell back to cuts
             j.update(state="done", url=f"/output/{out_name}")
         except Exception as e:
             j.update(state="error", error=str(e))
